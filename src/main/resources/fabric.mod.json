@@ -1,0 +1,33 @@
+{
+	"schemaVersion": 1,
+	"id": "recordingmod",
+	"version": "${version}",
+	"name": "Recording Mod",
+	"description": "even better than obs",
+	"authors": [
+		"aris"
+	],
+	"license": "ARR",
+	"environment": "client",
+	"entrypoints": {
+		"client": [
+			{
+				"adapter": "kotlin",
+				"value": "me.aris.recordingmod.RecordingModClient"
+			}
+		]
+	},
+	"mixins": [
+		{
+			"config": "recordingmod.mixins.json",
+			"environment": "client"
+		}
+	],
+	"depends": {
+		"fabricloader": ">=0.19.5",
+		"minecraft": "~1.20.1",
+		"java": ">=17",
+		"fabric-api": "*",
+		"fabric-language-kotlin": "*"
+	}
+}

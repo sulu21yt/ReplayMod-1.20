@@ -1,0 +1,18 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "me.aris.recordingmod.mixins",
+  "compatibilityLevel": "JAVA_17",
+  "client": [
+    "ClientLevelMixin",
+    "ConnectionMixin",
+    "GameRendererMixin",
+    "LevelMixin",
+    "LivingEntitySwingMixin",
+    "MinecraftHandleKeybindsMixin",
+    "ParticleEngineMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

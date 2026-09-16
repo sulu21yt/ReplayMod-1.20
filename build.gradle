@@ -1,104 +1,92 @@
-buildscript {
-  ext.kotlin_version = '1.3.72'
-  repositories {
-    mavenLocal()
-    mavenCentral()
-    maven {
-      name = "sonatype"
-      url = "https://oss.sonatype.org/content/repositories/snapshots/"
-    }
-    maven {
-      name = "forge"
-      url = "https://files.minecraftforge.net/maven"
-    }
-    maven {
-      name = 'sponge'
-      url = 'https://repo.spongepowered.org/maven'
-    }
-  }
-  dependencies {
-    classpath 'net.minecraftforge.gradle:ForgeGradle:2.3-SNAPSHOT'
-    classpath 'org.spongepowered:mixingradle:0.4-SNAPSHOT'
-    classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
-  }
+plugins {
+	id 'net.fabricmc.fabric-loom-remap' version "${loom_version}"
+	id 'org.jetbrains.kotlin.jvm' version "${kotlin_version}"
+	id 'maven-publish'
 }
-
-//plugins {
-//  id "org.jetbrains.kotlin.jvm" version "1.3.61"
-//}
-
-apply plugin: 'net.minecraftforge.gradle.liteloader'
-apply plugin: 'kotlin'
-apply plugin: 'org.spongepowered.mixin'
-
-group = 'me.aris'
-version = '1.0-SNAPSHOT'
-archivesBaseName = 'recording-mod'
-
-minecraft {
-  version = project.mcVersion
-  mappings = project.mcpMappings
-  runDir = "run"
-}
-
-task cleanBuild(dependsOn: [build, clean]) {}
-build.mustRunAfter(clean)
-
 
 repositories {
-  mavenCentral()
+	// Add repositories to retrieve artifacts from in here.
+	// You should only use this when depending on other mods because
+	// Loom adds the essential maven repositories to download Minecraft and libraries from automatically.
+	// See https://docs.gradle.org/current/userguide/declaring_repositories.html
+	// for more information about repositories.
+	maven {
+		name = 'Fabric'
+		url = 'https://maven.fabricmc.net/'
+	}
 }
 
-configurations {
-  fat
+loom {
+	splitEnvironmentSourceSets()
+
+	mods {
+		"recordingmod" {
+			sourceSet sourceSets.main
+			sourceSet sourceSets.client
+		}
+	}
 }
 
 dependencies {
-  fat "org.jetbrains.kotlin:kotlin-stdlib-jdk8:$kotlin_version"
-  fat 'org.apache.commons:commons-compress:1.21'
-  fat 'org.tukaani:xz:1.9'
-  configurations.implementation.extendsFrom(configurations.fat)
+	// To change the versions see the gradle.properties file
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	mappings loom.officialMojangMappings()
+	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+
+	// Fabric API. This is technically optional, but you probably want it anyway.
+	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+
+	// Kotlin support
+	modImplementation "net.fabricmc:fabric-language-kotlin:${project.fabric_kotlin_version}"
 }
 
-compileKotlin {
-  kotlinOptions {
-    jvmTarget = "1.8"
-  }
-}
-compileTestKotlin {
-  kotlinOptions {
-    jvmTarget = "1.8"
-  }
+processResources {
+	def version = project.version
+	inputs.property "version", version
+
+	filesMatching("fabric.mod.json") {
+		expand "version": version
+	}
 }
 
-mixin {
-  defaultObfuscationEnv notch
+tasks.withType(JavaCompile).configureEach {
+	it.options.release = 17
 }
 
-litemod {
-  json {
-    name = "recording_mod"
-    mcversion = "1.12.2"
-    description = "even better than obs"
-    mixinConfigs += "mixins.recordingmod.json"
-  }
+tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+	kotlinOptions {
+		jvmTarget = "17"
+	}
 }
 
-sourceSets {
-  main {
-    ext.refMap = "mixins.recordingmod.refmap.json"
-  }
-}
+java {
+	// Loom will automatically attach sourcesJar to a RemapSourcesJar task and to the "build" task
+	// if it is present.
+	// If you remove this line, sources will not be generated.
+	withSourcesJar()
 
+	sourceCompatibility = JavaVersion.VERSION_17
+	targetCompatibility = JavaVersion.VERSION_17
+}
 
 jar {
-  from litemod.outputs
-  from {
-    configurations.fat.collect {
-      it.isDirectory() ? it : zipTree(it)
-    }
-  }
-  exclude "**/module-info.class"
-  exclude 'META-INF/*.RSA', 'META-INF/*.SF', 'META-INF/*.DSA'
+	def projectName = project.name
+	inputs.property "projectName", projectName
 }
 
+// configure the maven publication
+publishing {
+	publications {
+		create("mavenJava", MavenPublication) {
+			from components.java
+		}
+	}
+
+	// See https://docs.gradle.org/current/userguide/publishing_maven.html for information on how to set up publishing.
+	repositories {
+		// Add repositories to publish to here.
+		// Notice: This block does NOT have the same function as the block in the top level.
+		// The repositories here will be used for publishing your artifact, not for
+		// retrieving dependencies.
+	}
+}

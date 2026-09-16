@@ -1,0 +1,104 @@
+buildscript {
+  ext.kotlin_version = '1.3.72'
+  repositories {
+    mavenLocal()
+    mavenCentral()
+    maven {
+      name = "sonatype"
+      url = "https://oss.sonatype.org/content/repositories/snapshots/"
+    }
+    maven {
+      name = "forge"
+      url = "https://files.minecraftforge.net/maven"
+    }
+    maven {
+      name = 'sponge'
+      url = 'https://repo.spongepowered.org/maven'
+    }
+  }
+  dependencies {
+    classpath 'net.minecraftforge.gradle:ForgeGradle:2.3-SNAPSHOT'
+    classpath 'org.spongepowered:mixingradle:0.4-SNAPSHOT'
+    classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+  }
+}
+
+//plugins {
+//  id "org.jetbrains.kotlin.jvm" version "1.3.61"
+//}
+
+apply plugin: 'net.minecraftforge.gradle.liteloader'
+apply plugin: 'kotlin'
+apply plugin: 'org.spongepowered.mixin'
+
+group = 'me.aris'
+version = '1.0-SNAPSHOT'
+archivesBaseName = 'recording-mod'
+
+minecraft {
+  version = project.mcVersion
+  mappings = project.mcpMappings
+  runDir = "run"
+}
+
+task cleanBuild(dependsOn: [build, clean]) {}
+build.mustRunAfter(clean)
+
+
+repositories {
+  mavenCentral()
+}
+
+configurations {
+  fat
+}
+
+dependencies {
+  fat "org.jetbrains.kotlin:kotlin-stdlib-jdk8:$kotlin_version"
+  fat 'org.apache.commons:commons-compress:1.21'
+  fat 'org.tukaani:xz:1.9'
+  configurations.implementation.extendsFrom(configurations.fat)
+}
+
+compileKotlin {
+  kotlinOptions {
+    jvmTarget = "1.8"
+  }
+}
+compileTestKotlin {
+  kotlinOptions {
+    jvmTarget = "1.8"
+  }
+}
+
+mixin {
+  defaultObfuscationEnv notch
+}
+
+litemod {
+  json {
+    name = "recording_mod"
+    mcversion = "1.12.2"
+    description = "even better than obs"
+    mixinConfigs += "mixins.recordingmod.json"
+  }
+}
+
+sourceSets {
+  main {
+    ext.refMap = "mixins.recordingmod.refmap.json"
+  }
+}
+
+
+jar {
+  from litemod.outputs
+  from {
+    configurations.fat.collect {
+      it.isDirectory() ? it : zipTree(it)
+    }
+  }
+  exclude "**/module-info.class"
+  exclude 'META-INF/*.RSA', 'META-INF/*.SF', 'META-INF/*.DSA'
+}
+
