@@ -6,8 +6,10 @@
   "client": [
     "ClientLevelMixin",
     "ConnectionMixin",
+    "EntityMovementSoundInvokerMixin",
     "GameRendererMixin",
     "LevelMixin",
+    "LevelPlaySoundMixin",
     "LivingEntitySwingMixin",
     "MinecraftHandleKeybindsMixin",
     "ParticleEngineMixin"

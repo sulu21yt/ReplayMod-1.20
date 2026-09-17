@@ -3,12 +3,16 @@ package me.aris.recordingmod
 import io.netty.buffer.Unpooled
 import me.aris.recordingmod.RecordingFormat.BLOCK_BREAK_PROGRESS
 import me.aris.recordingmod.RecordingFormat.BLOCK_CHANGE
+import me.aris.recordingmod.RecordingFormat.LOCAL_LEVEL_EVENT
+import me.aris.recordingmod.RecordingFormat.LOCAL_PLAY_SOUND
 import me.aris.recordingmod.RecordingFormat.MINING_PARTICLE
 import me.aris.recordingmod.RecordingFormat.PLAYER_SNAPSHOT
 import me.aris.recordingmod.RecordingFormat.SWING
 import me.aris.recordingmod.RecordingFormat.TICK_END
+import me.aris.recordingmod.mixins.EntityMovementSoundInvokerMixin
 import net.minecraft.client.Minecraft
 import net.minecraft.client.gui.screens.TitleScreen
+import net.minecraft.core.BlockPos
 import net.minecraft.core.Direction
 import net.minecraft.network.Connection
 import net.minecraft.network.ConnectionProtocol
@@ -16,8 +20,12 @@ import net.minecraft.network.FriendlyByteBuf
 import net.minecraft.network.PacketListener
 import net.minecraft.network.protocol.Packet
 import net.minecraft.network.protocol.PacketFlow
+import net.minecraft.sounds.SoundEvent
+import net.minecraft.sounds.SoundSource
+import net.minecraft.tags.FluidTags
 import net.minecraft.util.Mth
 import net.minecraft.world.InteractionHand
+import net.minecraft.world.entity.player.Player
 import net.minecraft.world.level.block.Block
 import net.minecraft.world.phys.Vec3
 import org.slf4j.LoggerFactory
@@ -41,6 +49,14 @@ object PlaybackManager {
 
   private var previous: LookState? = null
   private var current: LookState? = null
+
+  // Our own reimplementation of Entity's private moveDist/nextStep fields, since footstep sounds
+  // are normally a side effect of Entity.move()'s physics pass, which playback never calls (see
+  // applySnapshot). Mirrors the threshold logic in Entity.move() (moveDist accumulates horizontal
+  // distance * 0.6, a step fires once it passes nextStep, which then advances to floor(moveDist)+1).
+  private var stepMoveDist = 0f
+  private var stepNextThreshold = 1f
+  private var wasInWater = false
 
   fun start(file: File) {
     resetState()
@@ -79,6 +95,9 @@ object PlaybackManager {
     listener = null
     previous = null
     current = null
+    stepMoveDist = 0f
+    stepNextThreshold = 1f
+    wasInWater = false
   }
 
   // Public: the user is done watching (or the file ran out, or something broke) - actually leave
@@ -128,6 +147,8 @@ object PlaybackManager {
           SWING -> applySwing(buf)
           BLOCK_BREAK_PROGRESS -> applyBlockBreakProgress(buf)
           MINING_PARTICLE -> applyMiningParticle(buf)
+          LOCAL_LEVEL_EVENT -> applyLocalLevelEvent(buf)
+          LOCAL_PLAY_SOUND -> applyLocalPlaySound(buf)
           else -> {
             if (id < 0) {
               LOGGER.warn("Unknown record type {} in recording, stopping playback", id)
@@ -180,13 +201,53 @@ object PlaybackManager {
     val selectedSlot = buf.readVarInt()
 
     val newState = LookState(x, y, z, yaw, pitch)
-    previous = current ?: newState
+    val lastTick = current
+    previous = lastTick ?: newState
     current = newState
 
     val player = Minecraft.getInstance().player ?: return
     player.setDeltaMovement(Vec3(motionX, motionY, motionZ))
     player.setOnGround(onGround)
     player.inventory.selected = selectedSlot
+
+    val level = Minecraft.getInstance().level
+    val isInWater = level?.getFluidState(BlockPos.containing(x, y, z))?.`is`(FluidTags.WATER) ?: false
+    if (isInWater && !wasInWater) {
+      (player as EntityMovementSoundInvokerMixin).`recordingmod$doWaterSplashEffect`()
+    }
+    wasInWater = isInWater
+
+    if (lastTick != null) {
+      maybePlayMovementSound(player, lastTick, newState, onGround, isInWater)
+    }
+  }
+
+  // Reimplements just enough of Entity.move()'s footstep/swim-sound-triggering logic (see the
+  // invoker mixin's own comment for why) to make walking and swimming during playback audible
+  // again: accumulate horizontal distance moved since the last tick, and once it crosses the
+  // threshold, play the real step or swim sound via the invoker mixin - mirroring the moveDist/
+  // nextStep bookkeeping Entity.move() does internally for the same purpose.
+  private fun maybePlayMovementSound(player: Player, from: LookState, to: LookState, onGround: Boolean, isInWater: Boolean) {
+    val dx = to.x - from.x
+    val dz = to.z - from.z
+    val horizontalDist = Mth.sqrt((dx * dx + dz * dz).toFloat())
+    stepMoveDist += horizontalDist * 0.6f
+    if (stepMoveDist <= stepNextThreshold) return
+    stepNextThreshold = stepMoveDist.toInt() + 1f
+
+    val invoker = player as EntityMovementSoundInvokerMixin
+    if (isInWater) {
+      invoker.`recordingmod$waterSwimSound`()
+      return
+    }
+    if (!onGround) return
+
+    val level = Minecraft.getInstance().level ?: return
+    val pos = player.onPos
+    val state = level.getBlockState(pos)
+    if (!state.isAir) {
+      invoker.`recordingmod$playStepSound`(pos, state)
+    }
   }
 
   // Called every render frame (not just every tick) via GameRendererMixin, before the camera
@@ -240,6 +301,27 @@ object PlaybackManager {
     val pos = buf.readBlockPos()
     val direction = Direction.from3DDataValue(buf.readVarInt())
     Minecraft.getInstance().particleEngine.crack(pos, direction)
+  }
+
+  private fun applyLocalLevelEvent(buf: FriendlyByteBuf) {
+    val type = buf.readVarInt()
+    val pos = buf.readBlockPos()
+    val data = buf.readVarInt()
+    val level = Minecraft.getInstance().level ?: return
+    val player = Minecraft.getInstance().player
+    level.levelEvent(player, type, pos, data)
+  }
+
+  private fun applyLocalPlaySound(buf: FriendlyByteBuf) {
+    val pos = buf.readBlockPos()
+    val location = buf.readResourceLocation()
+    val source = buf.readEnum(SoundSource::class.java)
+    val volume = buf.readFloat()
+    val pitch = buf.readFloat()
+    val level = Minecraft.getInstance().level ?: return
+    val player = Minecraft.getInstance().player
+    val sound = SoundEvent.createVariableRangeEvent(location)
+    level.playSound(player, pos, sound, source, volume, pitch)
   }
 
   private class ClientPacketListenerHandle(

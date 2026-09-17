@@ -33,6 +33,18 @@ object RecordingFormat {
   // a real ClientboundLevelEventPacket and already replays fine) - it's triggered purely from
   // local input handling (Minecraft.continueAttack), so it never reaches us as a packet either.
   const val MINING_PARTICLE = -6
+  // A ClientLevel.levelEvent(Player, type, pos, data) call attributed to the local player - e.g.
+  // the block-break sound+particle burst fired directly by Block.spawnDestroyParticles when WE
+  // predict breaking a block. Despite looking just like a real level event, this is purely local:
+  // ClientLevel.levelEvent(Player, ...) never goes through the network in either direction (see
+  // RecordingManager.onLocalLevelEvent), unlike a genuine ClientboundLevelEventPacket from the
+  // server (which already replays fine as an ordinary packet and is unaffected by this).
+  const val LOCAL_LEVEL_EVENT = -7
+  // A Level.playSound(Player, pos, sound, source, volume, pitch) call attributed to the local
+  // player - e.g. the block-place sound fired directly by BlockItem.place(). Same story as
+  // LOCAL_LEVEL_EVENT above: on the client this only ever plays for player == mc.player and never
+  // touches the network (see RecordingManager.onLocalPlaySound).
+  const val LOCAL_PLAY_SOUND = -8
 
   fun newBuffer(): FriendlyByteBuf = FriendlyByteBuf(Unpooled.buffer())
 

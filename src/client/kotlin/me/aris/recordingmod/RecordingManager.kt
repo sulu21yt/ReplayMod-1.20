@@ -2,6 +2,8 @@ package me.aris.recordingmod
 
 import me.aris.recordingmod.RecordingFormat.BLOCK_BREAK_PROGRESS
 import me.aris.recordingmod.RecordingFormat.BLOCK_CHANGE
+import me.aris.recordingmod.RecordingFormat.LOCAL_LEVEL_EVENT
+import me.aris.recordingmod.RecordingFormat.LOCAL_PLAY_SOUND
 import me.aris.recordingmod.RecordingFormat.MINING_PARTICLE
 import me.aris.recordingmod.RecordingFormat.PLAYER_SNAPSHOT
 import me.aris.recordingmod.RecordingFormat.SWING
@@ -29,6 +31,8 @@ import net.minecraft.network.protocol.game.ClientboundRespawnPacket
 import net.minecraft.network.protocol.game.ClientboundSetChunkCacheCenterPacket
 import net.minecraft.network.protocol.game.ClientboundSetDefaultSpawnPositionPacket
 import net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket
+import net.minecraft.sounds.SoundEvent
+import net.minecraft.sounds.SoundSource
 import net.minecraft.world.InteractionHand
 import net.minecraft.world.entity.LivingEntity
 import net.minecraft.world.entity.player.Player
@@ -359,6 +363,59 @@ object RecordingManager {
     buf.writeVarInt(MINING_PARTICLE)
     buf.writeBlockPos(pos)
     buf.writeVarInt(direction.get3DDataValue())
+
+    synchronized(lock) {
+      val stream = out ?: return
+      stream.write(buf.toByteArray())
+    }
+  }
+
+  // Called from ClientLevelMixin's hook on ClientLevel.levelEvent(Player, ...) - see
+  // RecordingFormat.LOCAL_LEVEL_EVENT for why this needs its own capture. Only the local player's
+  // own predicted events matter here; a real server-driven ClientboundLevelEventPacket (e.g. some
+  // other entity destroying a block) already replays fine as an ordinary packet and would arrive
+  // via a different, 3-arg overload we don't hook.
+  fun onLocalLevelEvent(player: Player?, type: Int, pos: BlockPos, data: Int) {
+    if (!active) return
+    if (player !== Minecraft.getInstance().player) return
+
+    val buf = newBuffer()
+    buf.writeVarInt(LOCAL_LEVEL_EVENT)
+    buf.writeVarInt(type)
+    buf.writeBlockPos(pos)
+    buf.writeVarInt(data)
+
+    synchronized(lock) {
+      val stream = out ?: return
+      stream.write(buf.toByteArray())
+    }
+  }
+
+  // Called from LevelPlaySoundMixin's hook on Level.playSound(Player, BlockPos, ...) - see
+  // RecordingFormat.LOCAL_PLAY_SOUND for why this needs its own capture (e.g. BlockItem.place()'s
+  // block-place sound). Only the local player's own predicted sounds matter here, and only on the
+  // client - the same Level method is also reachable on a real ServerLevel in singleplayer, since
+  // client and integrated server share one classloader.
+  fun onLocalPlaySound(
+    level: Level,
+    player: Player?,
+    pos: BlockPos,
+    sound: SoundEvent,
+    source: SoundSource,
+    volume: Float,
+    pitch: Float
+  ) {
+    if (!active) return
+    if (!level.isClientSide) return
+    if (player !== Minecraft.getInstance().player) return
+
+    val buf = newBuffer()
+    buf.writeVarInt(LOCAL_PLAY_SOUND)
+    buf.writeBlockPos(pos)
+    buf.writeResourceLocation(sound.location)
+    buf.writeEnum(source)
+    buf.writeFloat(volume)
+    buf.writeFloat(pitch)
 
     synchronized(lock) {
       val stream = out ?: return
