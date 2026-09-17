@@ -5,17 +5,12 @@ import net.minecraft.client.gui.components.Button
 import net.minecraft.client.gui.screens.Screen
 import net.minecraft.network.chat.Component
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
 
-// A simple list of past recordings so you can watch one back later, not just the most recent one.
-class RecordingsScreen(private val parent: Screen?) : Screen(Component.literal("Recordings")) {
-  private val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss")
-
+// Lists saved markers (see MarkerManager) so you can jump straight to a bookmarked moment in a
+// recording instead of scrubbing through it manually.
+class MarkersScreen(private val parent: Screen?) : Screen(Component.literal("Markers")) {
   override fun init() {
-    val files = RecordingConfig.recordingsDir.listFiles { f -> f.extension == "rec" }
-      ?.sortedByDescending { it.lastModified() }
-      ?: emptyList()
+    val markers = MarkerManager.list()
 
     val buttonWidth = 320
     val buttonHeight = 20
@@ -23,19 +18,26 @@ class RecordingsScreen(private val parent: Screen?) : Screen(Component.literal("
     val startY = 40
     val maxVisible = ((this.height - startY - 40) / (buttonHeight + spacing)).coerceAtLeast(1)
 
-    if (files.isEmpty()) {
+    if (markers.isEmpty()) {
       addRenderableWidget(
-        Button.builder(Component.literal("No recordings found")) {}
+        Button.builder(Component.literal("No markers found")) {}
           .bounds(this.width / 2 - buttonWidth / 2, startY, buttonWidth, buttonHeight)
           .build()
       ).active = false
     }
 
-    files.take(maxVisible).forEachIndexed { index, file ->
-      val label = "${file.nameWithoutExtension} (${dateFormat.format(Date(file.lastModified()))})"
+    markers.take(maxVisible).forEachIndexed { index, marker ->
+      val label = "${marker.name} (${marker.recordingBaseName}, tick ${marker.tick})"
       addRenderableWidget(
         Button.builder(Component.literal(label)) {
-          PlaybackManager.start(file)
+          val recordingFile = File(RecordingConfig.recordingsDir, "${marker.recordingBaseName}.rec")
+          if (!recordingFile.exists()) {
+            this.minecraft?.player?.displayClientMessage(
+              Component.literal("Recording \"${marker.recordingBaseName}\" no longer exists"), false
+            )
+            return@builder
+          }
+          PlaybackManager.startAtTick(recordingFile, marker.tick)
           this.minecraft?.setScreen(null)
         }.bounds(
           this.width / 2 - buttonWidth / 2,

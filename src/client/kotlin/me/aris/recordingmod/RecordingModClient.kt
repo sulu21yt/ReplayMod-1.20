@@ -14,8 +14,6 @@ import java.util.Date
 object RecordingModClient : ClientModInitializer {
   val LOGGER = LoggerFactory.getLogger("recordingmod")
 
-  private val recordingsDir = File("recordings")
-
   private val toggleRecordingKey = KeyMapping(
     "key.recordingmod.toggle_recording",
     InputConstants.Type.KEYSYM,
@@ -44,11 +42,29 @@ object RecordingModClient : ClientModInitializer {
     "category.recordingmod"
   )
 
+  private val openSettingsKey = KeyMapping(
+    "key.recordingmod.open_settings",
+    InputConstants.Type.KEYSYM,
+    InputConstants.UNKNOWN.value,
+    "category.recordingmod"
+  )
+
+  private val markMomentKey = KeyMapping(
+    "key.recordingmod.mark_moment",
+    InputConstants.Type.KEYSYM,
+    InputConstants.UNKNOWN.value,
+    "category.recordingmod"
+  )
+
   override fun onInitializeClient() {
+    RecordingConfig.load()
+
     KeyBindingHelper.registerKeyBinding(toggleRecordingKey)
     KeyBindingHelper.registerKeyBinding(playLastRecordingKey)
     KeyBindingHelper.registerKeyBinding(leavePlaybackKey)
     KeyBindingHelper.registerKeyBinding(openRecordingsKey)
+    KeyBindingHelper.registerKeyBinding(openSettingsKey)
+    KeyBindingHelper.registerKeyBinding(markMomentKey)
 
     ClientTickEvents.END_CLIENT_TICK.register { mc ->
       while (toggleRecordingKey.consumeClick()) {
@@ -67,6 +83,14 @@ object RecordingModClient : ClientModInitializer {
           mc.setScreen(RecordingsScreen(null))
         }
       }
+      while (openSettingsKey.consumeClick()) {
+        if (mc.screen == null) {
+          mc.setScreen(RecordingSettingsScreen(null))
+        }
+      }
+      while (markMomentKey.consumeClick()) {
+        markMoment()
+      }
 
       RecordingManager.onClientTick()
       if (PlaybackManager.active) {
@@ -77,6 +101,19 @@ object RecordingModClient : ClientModInitializer {
     LOGGER.info("Recording Mod (1.20.1 rewrite, milestone 1) initialized")
   }
 
+  private fun markMoment() {
+    val mc = net.minecraft.client.Minecraft.getInstance()
+    if (mc.screen != null) return
+
+    val file = RecordingManager.currentFile
+    if (!RecordingManager.active || file == null) {
+      mc.player?.displayClientMessage(Component.literal("Not recording - nothing to mark"), false)
+      return
+    }
+
+    mc.setScreen(MarkMomentScreen(file, RecordingManager.currentTick))
+  }
+
   private fun toggleRecording() {
     val mc = net.minecraft.client.Minecraft.getInstance()
     if (RecordingManager.active) {
@@ -84,7 +121,7 @@ object RecordingModClient : ClientModInitializer {
       mc.player?.displayClientMessage(Component.literal("Stopped recording"), false)
     } else {
       val name = SimpleDateFormat("yyyy_MM_dd_HH_mm_ss").format(Date())
-      val file = File(recordingsDir, "$name.rec")
+      val file = File(RecordingConfig.recordingsDir, "$name.rec")
       RecordingManager.start(file)
       mc.player?.displayClientMessage(Component.literal("Started recording to $file"), false)
     }
@@ -99,11 +136,13 @@ object RecordingModClient : ClientModInitializer {
       RecordingManager.stop()
     }
 
-    val latest = recordingsDir.listFiles { f -> f.extension == "rec" }
+    val latest = RecordingConfig.recordingsDir.listFiles { f -> f.extension == "rec" }
       ?.maxByOrNull { it.lastModified() }
 
     if (latest == null) {
-      mc.player?.displayClientMessage(Component.literal("No recordings found in $recordingsDir"), false)
+      mc.player?.displayClientMessage(
+        Component.literal("No recordings found in ${RecordingConfig.recordingsDir}"), false
+      )
       return
     }
 

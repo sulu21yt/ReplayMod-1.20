@@ -56,6 +56,16 @@ object RecordingManager {
   var active = false
     private set
 
+  // Exposed for the marker feature (see MarkerManager) - marking a moment needs to know which
+  // file is currently being recorded and how many ticks into it we are, neither of which is
+  // otherwise tracked anywhere once a tick's records have been written.
+  var currentFile: File? = null
+    private set
+
+  @Volatile
+  var currentTick = 0
+    private set
+
   private var out: BufferedOutputStream? = null
 
   // The most recent ClientboundLoginPacket, and (if it happened after that login, e.g. a
@@ -79,6 +89,8 @@ object RecordingManager {
       file.parentFile?.mkdirs()
       out = BufferedOutputStream(FileOutputStream(file))
       active = true
+      currentFile = file
+      currentTick = 0
       cachedLoginPacket?.let { writePacket(it) }
       cachedRespawnPacket?.let { writePacket(it) }
       cachedSpawnPositionPacket?.let { writePacket(it) }
@@ -97,6 +109,7 @@ object RecordingManager {
 
   private fun stopInternal() {
     active = false
+    currentFile = null
     out?.let {
       it.flush()
       it.close()
@@ -450,5 +463,6 @@ object RecordingManager {
       stream.write(snapshot.toByteArray())
       stream.write(tickEnd.toByteArray())
     }
+    currentTick++
   }
 }

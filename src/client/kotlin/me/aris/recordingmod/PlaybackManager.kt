@@ -20,6 +20,9 @@ import net.minecraft.network.FriendlyByteBuf
 import net.minecraft.network.PacketListener
 import net.minecraft.network.protocol.Packet
 import net.minecraft.network.protocol.PacketFlow
+import net.minecraft.network.protocol.game.ClientboundSoundEntityPacket
+import net.minecraft.network.protocol.game.ClientboundSoundPacket
+import net.minecraft.network.protocol.game.ClientboundStopSoundPacket
 import net.minecraft.sounds.SoundEvent
 import net.minecraft.sounds.SoundSource
 import net.minecraft.tags.FluidTags
@@ -57,6 +60,19 @@ object PlaybackManager {
   private var stepMoveDist = 0f
   private var stepNextThreshold = 1f
   private var wasInWater = false
+
+  // How many ticks of this playback we've processed so far - used by startAtTick to know when
+  // it's caught up to the requested marker tick.
+  @Volatile
+  var currentTick = 0
+    private set
+
+  // While fast-forwarding to a marker (see startAtTick), every tick between 0 and the target
+  // flies by near-instantly - playing every sound that would normally happen along the way would
+  // be a deafening burst of noise instead of a clean jump. Real sound packets and our own
+  // movement/local-event sound triggers are muted for the duration; world/entity state (which is
+  // what actually needs to be correct once we arrive) is applied normally either way.
+  private var isFastForwarding = false
 
   fun start(file: File) {
     resetState()
@@ -98,6 +114,24 @@ object PlaybackManager {
     stepMoveDist = 0f
     stepNextThreshold = 1f
     wasInWater = false
+    currentTick = 0
+    isFastForwarding = false
+  }
+
+  // Starts playback of `file` and immediately fast-forwards to `targetTick`, synchronously, before
+  // returning - used by MarkersScreen to jump straight to a bookmarked moment. This just replays
+  // every tick up to the target at once instead of waiting for real ticks (there's no keyframe/
+  // snapshot format to seek within), muting sound for the duration (see isFastForwarding).
+  fun startAtTick(file: File, targetTick: Int) {
+    start(file)
+    isFastForwarding = true
+    try {
+      while (active && currentTick < targetTick) {
+        tick()
+      }
+    } finally {
+      isFastForwarding = false
+    }
   }
 
   // Public: the user is done watching (or the file ran out, or something broke) - actually leave
@@ -141,7 +175,10 @@ object PlaybackManager {
         }
 
         when (val id = buf.readVarInt()) {
-          TICK_END -> return
+          TICK_END -> {
+            currentTick++
+            return
+          }
           PLAYER_SNAPSHOT -> applySnapshot(buf)
           BLOCK_CHANGE -> applyBlockChange(buf)
           SWING -> applySwing(buf)
@@ -169,8 +206,13 @@ object PlaybackManager {
             }
             val packetBuf = FriendlyByteBuf(buf.readBytes(length))
             val packet = ConnectionProtocol.PLAY.createPacket(PacketFlow.CLIENTBOUND, id, packetBuf)
+            val isSoundPacket = packet is ClientboundSoundPacket ||
+              packet is ClientboundSoundEntityPacket ||
+              packet is ClientboundStopSoundPacket
             if (packet == null) {
               LOGGER.warn("Could not reconstruct packet with id {}", id)
+            } else if (isFastForwarding && isSoundPacket) {
+              // skip - see isFastForwarding
             } else {
               try {
                 @Suppress("UNCHECKED_CAST")
@@ -212,7 +254,7 @@ object PlaybackManager {
 
     val level = Minecraft.getInstance().level
     val isInWater = level?.getFluidState(BlockPos.containing(x, y, z))?.`is`(FluidTags.WATER) ?: false
-    if (isInWater && !wasInWater) {
+    if (isInWater && !wasInWater && !isFastForwarding) {
       (player as EntityMovementSoundInvokerMixin).`recordingmod$doWaterSplashEffect`()
     }
     wasInWater = isInWater
@@ -234,6 +276,7 @@ object PlaybackManager {
     stepMoveDist += horizontalDist * 0.6f
     if (stepMoveDist <= stepNextThreshold) return
     stepNextThreshold = stepMoveDist.toInt() + 1f
+    if (isFastForwarding) return
 
     val invoker = player as EntityMovementSoundInvokerMixin
     if (isInWater) {
@@ -307,6 +350,7 @@ object PlaybackManager {
     val type = buf.readVarInt()
     val pos = buf.readBlockPos()
     val data = buf.readVarInt()
+    if (isFastForwarding) return
     val level = Minecraft.getInstance().level ?: return
     val player = Minecraft.getInstance().player
     level.levelEvent(player, type, pos, data)
@@ -318,6 +362,7 @@ object PlaybackManager {
     val source = buf.readEnum(SoundSource::class.java)
     val volume = buf.readFloat()
     val pitch = buf.readFloat()
+    if (isFastForwarding) return
     val level = Minecraft.getInstance().level ?: return
     val player = Minecraft.getInstance().player
     val sound = SoundEvent.createVariableRangeEvent(location)
