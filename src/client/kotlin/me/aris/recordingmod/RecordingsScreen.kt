@@ -18,6 +18,8 @@ class RecordingsScreen(private val parent: Screen?) : Screen(Component.literal("
       ?: emptyList()
 
     val buttonWidth = 320
+    val playButtonWidth = 244
+    val exportButtonWidth = buttonWidth - playButtonWidth - 4
     val buttonHeight = 20
     val spacing = 4
     val startY = 40
@@ -33,16 +35,24 @@ class RecordingsScreen(private val parent: Screen?) : Screen(Component.literal("
 
     files.take(maxVisible).forEachIndexed { index, file ->
       val label = "${file.nameWithoutExtension} (${dateFormat.format(Date(file.lastModified()))})"
+      val rowX = this.width / 2 - buttonWidth / 2
+      val rowY = startY + index * (buttonHeight + spacing)
       addRenderableWidget(
         Button.builder(Component.literal(label)) {
           PlaybackManager.start(file)
           this.minecraft?.setScreen(null)
-        }.bounds(
-          this.width / 2 - buttonWidth / 2,
-          startY + index * (buttonHeight + spacing),
-          buttonWidth,
-          buttonHeight
-        ).build()
+        }.bounds(rowX, rowY, playButtonWidth, buttonHeight).build()
+      )
+      addRenderableWidget(
+        Button.builder(Component.literal("Export")) {
+          val output = File(RecordingConfig.finalRenderPath, "${file.nameWithoutExtension}.mp4")
+          // Only close the screen if the export actually started - if ffmpeg failed to launch,
+          // PlaybackManager never started either, and closing anyway would leave the player
+          // staring at a blank world with no screen at all.
+          if (VideoExporter.start(file, output)) {
+            this.minecraft?.setScreen(null)
+          }
+        }.bounds(rowX + playButtonWidth + 4, rowY, exportButtonWidth, buttonHeight).build()
       )
     }
 

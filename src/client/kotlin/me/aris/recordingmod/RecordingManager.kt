@@ -31,6 +31,7 @@ import net.minecraft.network.protocol.game.ClientboundRespawnPacket
 import net.minecraft.network.protocol.game.ClientboundSetChunkCacheCenterPacket
 import net.minecraft.network.protocol.game.ClientboundSetDefaultSpawnPositionPacket
 import net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket
+import net.minecraft.network.protocol.game.ClientboundUpdateTagsPacket
 import net.minecraft.sounds.SoundEvent
 import net.minecraft.sounds.SoundSource
 import net.minecraft.world.InteractionHand
@@ -82,6 +83,13 @@ object RecordingManager {
   // playback gets stuck forever on the "Loading terrain" screen since it never learns that the
   // initial loading packets have arrived - same caching story as login/respawn above.
   private var cachedSpawnPositionPacket: ClientboundSetDefaultSpawnPositionPacket? = null
+  // Same "sent once near join" story as login/respawn/spawn-position, but for tag data
+  // (FluidTags.WATER and friends) - without it, a mid-session recording's fake ClientPacketListener
+  // never learns the server's tag bindings, so any tag lookup (e.g. "is this fluid water?") comes
+  // back false even though the block/fluid itself replays correctly. See PlaybackManager's water
+  // detection, which is exactly what surfaced this: real water, real WaterFluid state, but
+  // fluidState.is(FluidTags.WATER) was false because the tags were never bound during playback.
+  private var cachedUpdateTagsPacket: ClientboundUpdateTagsPacket? = null
 
   fun start(file: File) {
     synchronized(lock) {
@@ -92,6 +100,7 @@ object RecordingManager {
       currentFile = file
       currentTick = 0
       cachedLoginPacket?.let { writePacket(it) }
+      cachedUpdateTagsPacket?.let { writePacket(it) }
       cachedRespawnPacket?.let { writePacket(it) }
       cachedSpawnPositionPacket?.let { writePacket(it) }
       writeChunkSnapshot()
@@ -148,10 +157,13 @@ object RecordingManager {
       cachedLoginPacket = packet
       cachedRespawnPacket = null
       cachedSpawnPositionPacket = null
+      cachedUpdateTagsPacket = null
     } else if (packet is ClientboundRespawnPacket) {
       cachedRespawnPacket = packet
     } else if (packet is ClientboundSetDefaultSpawnPositionPacket) {
       cachedSpawnPositionPacket = packet
+    } else if (packet is ClientboundUpdateTagsPacket) {
+      cachedUpdateTagsPacket = packet
     }
 
     if (!active) return

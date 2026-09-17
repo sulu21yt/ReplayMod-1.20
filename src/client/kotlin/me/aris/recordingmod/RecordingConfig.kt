@@ -8,7 +8,8 @@ import java.io.File
 // Persisted settings, replacing the legacy LiteLoader mod's @ExposableOptions config (that API
 // doesn't exist on Fabric) - see RecordingSettingsScreen for the menu that edits these. The
 // 7-Zip path from the legacy config is intentionally gone: recordings are no longer compressed,
-// so there's nothing left to decompress.
+// so there's nothing left to decompress. ffmpegPath is new - the legacy mod encoded video with
+// its own native encoder (source not in this repo); this port pipes raw frames to ffmpeg instead.
 object RecordingConfig {
   private val LOGGER = LoggerFactory.getLogger("recordingmod/config")
   private val gson = GsonBuilder().setPrettyPrinting().create()
@@ -16,6 +17,7 @@ object RecordingConfig {
 
   var recordingPath = "recordings"
   var finalRenderPath = "final"
+  var ffmpegPath = "ffmpeg"
   var renderingWidth = 1920
   var renderingHeight = 1080
   var renderingFps = 60
@@ -26,6 +28,7 @@ object RecordingConfig {
   private data class Data(
     val recordingPath: String = "recordings",
     val finalRenderPath: String = "final",
+    val ffmpegPath: String = "ffmpeg",
     val renderingWidth: Int = 1920,
     val renderingHeight: Int = 1080,
     val renderingFps: Int = 60,
@@ -40,6 +43,7 @@ object RecordingConfig {
       val data = gson.fromJson(file.readText(), Data::class.java) ?: return
       recordingPath = data.recordingPath
       finalRenderPath = data.finalRenderPath
+      ffmpegPath = data.ffmpegPath
       renderingWidth = data.renderingWidth
       renderingHeight = data.renderingHeight
       renderingFps = data.renderingFps
@@ -53,7 +57,7 @@ object RecordingConfig {
 
   fun save() {
     val data = Data(
-      recordingPath, finalRenderPath, renderingWidth, renderingHeight,
+      recordingPath, finalRenderPath, ffmpegPath, renderingWidth, renderingHeight,
       renderingFps, blendFactor, proxyRenderingWidth, proxyRenderingHeight
     )
     try {

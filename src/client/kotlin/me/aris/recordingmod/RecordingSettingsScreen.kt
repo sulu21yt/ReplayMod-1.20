@@ -21,6 +21,7 @@ class RecordingSettingsScreen(private val parent: Screen?) : Screen(Component.li
 
   private lateinit var recordingPathField: EditBox
   private lateinit var finalRenderPathField: EditBox
+  private lateinit var ffmpegPathField: EditBox
   private lateinit var renderingWidthField: EditBox
   private lateinit var renderingHeightField: EditBox
   private lateinit var renderingFpsField: EditBox
@@ -41,7 +42,7 @@ class RecordingSettingsScreen(private val parent: Screen?) : Screen(Component.li
     labels.clear()
 
     val fieldLabelTexts = listOf(
-      "Recording Path", "Final Render Path", "Rendering Width", "Rendering Height",
+      "Recording Path", "Final Render Path", "Ffmpeg Path", "Rendering Width", "Rendering Height",
       "Rendering Fps", "Blend Factor", "Proxy Rendering Width", "Proxy Rendering Height"
     )
     val labelColumnWidth = fieldLabelTexts.maxOf { this.font.width(it) }
@@ -103,28 +104,33 @@ class RecordingSettingsScreen(private val parent: Screen?) : Screen(Component.li
       labelX, y, "Final Render Path", fieldWidth, RecordingConfig.finalRenderPath,
       "Folder where finished rendered videos will be saved"
     )
+    y += 24
+    ffmpegPathField = addField(
+      labelX, y, "Ffmpeg Path", fieldWidth, RecordingConfig.ffmpegPath,
+      "Path to the ffmpeg executable (\"ffmpeg\" if it's on your PATH) - used by the Export button on the Recordings screen"
+    )
 
     y += 30
-    addSectionHeader(labelX, y, "Rendering (not implemented yet)")
+    addSectionHeader(labelX, y, "Rendering")
     y += 14
     renderingWidthField = addField(
       labelX, y, "Rendering Width", fieldWidth, RecordingConfig.renderingWidth.toString(),
-      "Output video width in pixels for the final render"
+      "Not applied yet - Export currently captures at the game's actual current window size"
     )
     y += 24
     renderingHeightField = addField(
       labelX, y, "Rendering Height", fieldWidth, RecordingConfig.renderingHeight.toString(),
-      "Output video height in pixels for the final render"
+      "Not applied yet - Export currently captures at the game's actual current window size"
     )
     y += 24
     renderingFpsField = addField(
       labelX, y, "Rendering Fps", fieldWidth, RecordingConfig.renderingFps.toString(),
-      "Output video frame rate for the final render"
+      "Output video frame rate used by the Export button on the Recordings screen"
     )
     y += 24
     blendFactorField = addField(
       labelX, y, "Blend Factor", fieldWidth, RecordingConfig.blendFactor.toString(),
-      "How many recorded ticks are blended together per output frame, for motion blur"
+      "Not implemented yet - will control motion-blur frame blending"
     )
     y += 24
     proxyRenderingWidthField = addField(
@@ -162,6 +168,7 @@ class RecordingSettingsScreen(private val parent: Screen?) : Screen(Component.li
   override fun onClose() {
     RecordingConfig.recordingPath = recordingPathField.value
     RecordingConfig.finalRenderPath = finalRenderPathField.value
+    RecordingConfig.ffmpegPath = ffmpegPathField.value
     RecordingConfig.renderingWidth = renderingWidthField.value.toIntOrNull() ?: RecordingConfig.renderingWidth
     RecordingConfig.renderingHeight = renderingHeightField.value.toIntOrNull() ?: RecordingConfig.renderingHeight
     RecordingConfig.renderingFps = renderingFpsField.value.toIntOrNull() ?: RecordingConfig.renderingFps

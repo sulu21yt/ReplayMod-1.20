@@ -12,7 +12,8 @@
     "LevelPlaySoundMixin",
     "LivingEntitySwingMixin",
     "MinecraftHandleKeybindsMixin",
-    "ParticleEngineMixin"
+    "ParticleEngineMixin",
+    "WindowMixin"
   ],
   "injectors": {
     "defaultRequire": 1
