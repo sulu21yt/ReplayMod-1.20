@@ -10,6 +10,7 @@
     "GameRendererMixin",
     "LevelMixin",
     "LevelPlaySoundMixin",
+    "LibraryMixin",
     "LivingEntitySwingMixin",
     "MinecraftHandleKeybindsMixin",
     "ParticleEngineMixin",

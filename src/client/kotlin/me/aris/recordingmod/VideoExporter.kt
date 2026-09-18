@@ -49,6 +49,16 @@ object VideoExporter {
   private var accumBuffer: IntArray? = null
   private var outputFile: File? = null
 
+  // The video is encoded to a temp file first, and audio (see AudioExporter) captured to another
+  // temp file alongside it - both get muxed into the real outputFile only once the export
+  // finishes (see stop()). This sidesteps needing two *simultaneous* live streams into one ffmpeg
+  // process (which would need a named pipe or similar): if audio capture didn't start (e.g. the
+  // sound engine failed to switch to a loopback device), we just rename the video-only temp file
+  // to outputFile instead - a graceful fallback to a silent export rather than failing outright.
+  private var tempVideoFile: File? = null
+  private var tempAudioFile: File? = null
+  private var audioAvailable = false
+
   // Double-buffered pixel-pack buffer objects for asynchronous glReadPixels - see uncapFramerate's
   // comment for why the naive synchronous version defeated the whole point of uncapping fps. Each
   // frame we kick off a GPU-side copy into whichever PBO isn't currently "in flight", and read back
@@ -211,12 +221,14 @@ object VideoExporter {
     blendFactor = RecordingConfig.blendFactor.coerceAtLeast(1)
 
     outputFile.parentFile?.mkdirs()
+    val tempVideo = File(outputFile.parentFile, "${outputFile.nameWithoutExtension}.video.mp4")
+    val tempAudio = File(outputFile.parentFile, "${outputFile.nameWithoutExtension}.audio.raw")
     val command = listOf(
       RecordingConfig.ffmpegPath, "-y",
       "-f", "rawvideo", "-pixel_format", "rgba", "-video_size", "${width}x$height",
       "-framerate", fps.toString(), "-i", "-",
       "-vf", "vflip", "-pix_fmt", "yuv420p", "-c:v", "libx264", "-crf", "12",
-      outputFile.absolutePath
+      tempVideo.absolutePath
     )
 
     val proc = try {
@@ -240,6 +252,8 @@ object VideoExporter {
     val procStdin = proc.outputStream
     stdin = procStdin
     this.outputFile = outputFile
+    this.tempVideoFile = tempVideo
+    this.tempAudioFile = tempAudio
     val frameSize = width * height * 4
     rowBytes = ByteArray(frameSize)
     flushBytes = ByteArray(frameSize)
@@ -292,6 +306,13 @@ object VideoExporter {
     } else {
       PlaybackManager.start(recordingFile)
     }
+
+    // Not fatal if this fails - just export silent video, same as before audio capture existed.
+    audioAvailable = AudioExporter.start(tempAudio)
+    if (!audioAvailable) {
+      LOGGER.warn("Audio capture unavailable - exporting without sound")
+    }
+
     active = true
     mc.player?.displayClientMessage(Component.literal("Exporting to $outputFile ..."), false)
     return true
@@ -357,6 +378,8 @@ object VideoExporter {
       stop()
       return
     }
+
+    if (audioAvailable) AudioExporter.pullSamples()
 
     // Figure out which output frame's time window we're currently inside. Advancing our own
     // virtual clock (instead of reading real elapsed time directly) is what lets a slow-motion
@@ -462,6 +485,7 @@ object VideoExporter {
     if (!active) return
     active = false
     if (PlaybackManager.active) PlaybackManager.stop()
+    AudioExporter.stop()
 
     frameQueue?.let { flushAccumulator(it) }
     currentOutputFrameIndex = -1L
@@ -470,6 +494,9 @@ object VideoExporter {
     restoreFramerate(Minecraft.getInstance())
 
     val finishedFile = outputFile
+    val finishingTempVideo = tempVideoFile
+    val finishingTempAudio = tempAudioFile
+    val finishingAudioAvailable = audioAvailable
     val finishingProcess = process
     val finishingStdin = stdin
     val finishingQueue = frameQueue
@@ -485,6 +512,16 @@ object VideoExporter {
         finishingWriter?.join()
         finishingStdin?.close()
         finishingProcess?.waitFor()
+
+        if (finishedFile != null && finishingTempVideo != null) {
+          if (finishingAudioAvailable && finishingTempAudio != null && finishingTempAudio.exists()) {
+            muxVideoAndAudio(finishingTempVideo, finishingTempAudio, finishedFile)
+            finishingTempVideo.delete()
+            finishingTempAudio.delete()
+          } else if (!finishingTempVideo.renameTo(finishedFile)) {
+            LOGGER.warn("Could not move {} to {}", finishingTempVideo, finishedFile)
+          }
+        }
         LOGGER.info("Finished exporting to {}", finishedFile)
       } catch (e: Exception) {
         LOGGER.warn("Error finishing ffmpeg export", e)
@@ -505,10 +542,35 @@ object VideoExporter {
     flushBytes = null
     accumBuffer = null
     outputFile = null
+    tempVideoFile = null
+    tempAudioFile = null
+    audioAvailable = false
     sloMoRegions = emptyList()
     virtualElapsedSeconds = 0.0
 
     restoreWindowSizeIfNeeded()
+  }
+
+  // Muxes the finished silent video and raw captured audio into the real output file. Runs
+  // synchronously on the same background "finishing" thread that already waits for the video
+  // ffmpeg process, since it's off the render thread either way.
+  private fun muxVideoAndAudio(video: File, audio: File, output: File) {
+    val command = listOf(
+      RecordingConfig.ffmpegPath, "-y",
+      "-i", video.absolutePath,
+      "-f", "s16le", "-ar", AudioExporter.SAMPLE_RATE.toString(), "-ac", AudioExporter.CHANNELS.toString(),
+      "-i", audio.absolutePath,
+      "-c:v", "copy", "-c:a", "aac", "-shortest",
+      output.absolutePath
+    )
+    try {
+      val proc = ProcessBuilder(command)
+        .redirectError(ProcessBuilder.Redirect.appendTo(File(output.parentFile, "ffmpeg.log")))
+        .start()
+      proc.waitFor()
+    } catch (e: Exception) {
+      LOGGER.warn("Failed to mux audio into {}", output, e)
+    }
   }
 
   private fun restoreWindowSizeIfNeeded() {
