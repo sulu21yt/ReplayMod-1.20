@@ -25,10 +25,16 @@ import java.nio.ShortBuffer
 // the captured samples back out through a normal line, but that's real added complexity and
 // wasn't the priority for getting audio into the export at all.
 //
-// Not tied to VideoExporter's virtual/slow-mo clock - real game audio plays out at a real,
-// un-sped-up pace no matter how the video is being sampled/blended for output, so pullSamples()
-// just tracks real wall-clock time directly. This means a slow-motion blueprint region's audio
-// will not currently stay in sync with its stretched-out video - a known gap, not attempted here.
+// pullSamples() renders exactly one tick's worth of audio (SAMPLE_RATE / 20) each time it's
+// called, rather than however much real wall-clock time has passed - VideoExporter now drives
+// PlaybackManager.tick() directly, one tick per captured frame with no real-time pacing at all (so
+// export runs as fast as rendering/encoding can sustain), and calls this exactly once per tick to
+// match. The sound engine itself always renders normal-speed, un-sped-up audio content regardless
+// of how fast we ask for it (alcRenderSamplesSOFT has no concept of wall-clock time, only of how
+// many samples have been requested so far), so the captured file ends up representing the
+// recording's own real-time audio timeline even though the export process itself runs much
+// faster - VideoExporter separately stretches slow-motion spans of it back in sync at mux time
+// (see its AudioSpeedSegment/atempo handling), since this capture is unaware of slow-mo entirely.
 object AudioExporter {
   private val LOGGER = LoggerFactory.getLogger("recordingmod/audio")
 
@@ -43,10 +49,10 @@ object AudioExporter {
   var active = false
     private set
 
+  private const val SAMPLES_PER_TICK = SAMPLE_RATE / 20
+
   private var device = 0L
   private var outputStream: BufferedOutputStream? = null
-  private var lastPullNanos = 0L
-  private var fractionalSamples = 0.0
   private var sampleBuffer: ShortBuffer? = null
   private var byteScratch: ByteArray? = null
 
@@ -88,49 +94,35 @@ object AudioExporter {
 
     audioFile.parentFile?.mkdirs()
     outputStream = BufferedOutputStream(FileOutputStream(audioFile))
-    sampleBuffer = BufferUtils.createShortBuffer(SAMPLE_RATE * CHANNELS)
-    byteScratch = ByteArray(SAMPLE_RATE * CHANNELS * 2)
-    lastPullNanos = System.nanoTime()
-    fractionalSamples = 0.0
+    sampleBuffer = BufferUtils.createShortBuffer(SAMPLES_PER_TICK * CHANNELS)
+    byteScratch = ByteArray(SAMPLES_PER_TICK * CHANNELS * 2)
     active = true
     return true
   }
 
-  // Called once per real rendered frame from VideoExporter.onFrameReady - pulls however many
-  // sample frames correspond to the real time elapsed since the last call.
+  // Called once per tick from VideoExporter.onFrameReady (right after PlaybackManager.tick()) -
+  // renders exactly one tick's worth of normal-speed audio content, regardless of how much real
+  // time that call actually took.
   fun pullSamples() {
     if (!active) return
     val dev = device
     if (dev == 0L) return
 
-    val now = System.nanoTime()
-    val deltaSeconds = (now - lastPullNanos) / 1_000_000_000.0
-    lastPullNanos = now
-    fractionalSamples += deltaSeconds * SAMPLE_RATE
-    val samplesToRender = fractionalSamples.toInt()
-    if (samplesToRender <= 0) return
-    fractionalSamples -= samplesToRender
-
     val buffer = sampleBuffer ?: return
     val scratch = byteScratch ?: return
     val out = outputStream ?: return
 
-    var remaining = samplesToRender
     try {
-      while (remaining > 0) {
-        val chunk = remaining.coerceAtMost(buffer.capacity() / CHANNELS)
-        buffer.clear()
-        SOFTLoopback.alcRenderSamplesSOFT(dev, buffer, chunk)
-        buffer.rewind()
-        val sampleCount = chunk * CHANNELS
-        for (i in 0 until sampleCount) {
-          val sample = buffer.get(i).toInt()
-          scratch[i * 2] = (sample and 0xFF).toByte()
-          scratch[i * 2 + 1] = ((sample shr 8) and 0xFF).toByte()
-        }
-        out.write(scratch, 0, sampleCount * 2)
-        remaining -= chunk
+      buffer.clear()
+      SOFTLoopback.alcRenderSamplesSOFT(dev, buffer, SAMPLES_PER_TICK)
+      buffer.rewind()
+      val sampleCount = SAMPLES_PER_TICK * CHANNELS
+      for (i in 0 until sampleCount) {
+        val sample = buffer.get(i).toInt()
+        scratch[i * 2] = (sample and 0xFF).toByte()
+        scratch[i * 2 + 1] = ((sample shr 8) and 0xFF).toByte()
       }
+      out.write(scratch, 0, sampleCount * 2)
     } catch (e: Exception) {
       LOGGER.warn("Failed writing captured audio, stopping audio capture", e)
       stop()

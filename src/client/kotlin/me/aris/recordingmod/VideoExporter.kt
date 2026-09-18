@@ -16,13 +16,16 @@ import java.util.concurrent.ArrayBlockingQueue
 // compute shaders bound to Minecraft 1.12.2's internal framebuffer) with a much simpler pipeline:
 // pipe raw RGBA frames straight to an ffmpeg subprocess over stdin.
 //
-// Playback still advances at its natural (real-time) pace - PlaybackManager.tick() is driven by
-// the normal client tick loop either way - but rendering is uncapped (fps limit removed, vsync
-// off) for the duration of an export, so real frames arrive faster than the target output fps.
-// That's also what makes RecordingConfig.blendFactor mean anything: each output frame's pixels
-// are the average of every real frame captured while playback was "inside" that output frame's
-// time window (capped at blendFactor samples), which is genuine motion blur since those are
-// actually distinct rendered moments, not the same frame copied onto itself.
+// Playback is driven directly from here (see nextRenderFrameFraction/onFrameReady) instead of
+// Minecraft's own real-time-paced client tick loop (which RecordingModClient explicitly skips
+// while an export is active), with no real-time waiting at all, so the whole export runs as fast
+// as rendering/encoding can sustain instead of waiting on real 20 ticks/sec. Each *output* frame
+// still gets a distinct, correctly interpolated camera position between the two ticks it falls
+// between (see nextRenderFrameFraction) rather than every frame just duplicating the latest raw
+// tick's state - that's what keeps motion smooth despite ticks no longer being real-time-paced.
+// This is a deliberate trade-off: RecordingConfig.blendFactor no longer has any real effect during
+// export (there's only ever one genuinely distinct sample per output frame now - an interpolated
+// position, not several real sub-frames to average - so there's nothing left to blend).
 //
 // Frame capture uses double-buffered PBOs (see onFrameReady) instead of a plain synchronous
 // glReadPixels - measured directly on this project, a synchronous read capped real fps to ~60-90
@@ -42,7 +45,6 @@ object VideoExporter {
   private var height = 0
   private var fps = 0
   private var blendFactor = 1
-  private var startTimeNanos = 0L
   private var framesWritten = 0L
   private var rowBytes: ByteArray? = null
   private var flushBytes: ByteArray? = null
@@ -59,17 +61,18 @@ object VideoExporter {
   private var tempAudioFile: File? = null
   private var audioAvailable = false
 
-  // Real game audio is captured at real, un-sped-up wall-clock pace (see AudioExporter) even
-  // during a slow-mo region, where the *video* clock below runs faster than real time to stretch
-  // that portion over more output frames. Left alone, the muxed audio track would end up shorter
-  // than its corresponding video segment and drift out of sync. Fixed at mux time instead of in
-  // AudioExporter itself: track the real-time (seconds since AudioExporter actually started, a
-  // separate clock from virtualElapsedSeconds below) span of each distinct multiplier the export
-  // passed through, then stretch each span's *already-captured* audio with ffmpeg's atempo filter
-  // to match how much longer the video got - see muxVideoAndAudio/atempoChain.
+  // Real game audio is captured one tick's worth at a time (see AudioExporter.pullSamples), at
+  // its own natural un-sped-up pace, even during a slow-mo region where the *video* clock below
+  // runs faster than that to stretch that portion over more output frames. Left alone, the muxed
+  // audio track would end up shorter than its corresponding video segment and drift out of sync.
+  // Fixed at mux time instead of in AudioExporter itself: track the audio-time (in ticks, i.e.
+  // exactly how much real-paced audio AudioExporter has produced so far - a separate clock from
+  // virtualElapsedSeconds below) span of each distinct multiplier the export passed through, then
+  // stretch each span's *already-captured* audio with ffmpeg's atempo filter to match how much
+  // longer the video got - see muxVideoAndAudio/atempoChain.
   private data class AudioSpeedSegment(val realStart: Double, val realEnd: Double, val multiplier: Int)
   private val audioSpeedSegments = mutableListOf<AudioSpeedSegment>()
-  private var audioOriginNanos = 0L
+  private var audioTicksElapsed = 0L
   private var segmentStartReal = 0.0
   private var segmentMultiplier = 1
 
@@ -147,15 +150,34 @@ object VideoExporter {
   // on is far more useful than failing outright.
   private const val STABLE_FRAMES_REQUIRED = 5
 
-  // Slow-motion support (blueprint rendering only, see startBlueprintRender): instead of an
-  // absolute "elapsedSeconds = now - startTime" like the plain export used, we accumulate our own
-  // virtual clock frame-by-frame so it can be made to run slower than real time while the current
-  // tick falls inside a slow-motion region - which stretches that portion of the recording over
-  // more output frames, i.e. exactly what slow motion is. With no regions (the plain export path)
-  // this is numerically identical to the old absolute-time calculation.
+  // The video's own clock: every captured/output frame is exactly 1/fps seconds of video, always
+  // (see onFrameReady) - unaffected by slow-mo multipliers, since stretching now happens on the
+  // *game-time* side instead (see gameSecondsElapsed) rather than by making some frames represent
+  // more video-time than others.
   private var sloMoRegions: List<BlueprintManager.SloMoRegion> = emptyList()
   private var virtualElapsedSeconds = 0.0
-  private var lastFrameNanos = 0L
+  private const val TICK_SECONDS = 1.0 / 20.0
+
+  // How much game time (in ticks, fractionally) *should* have elapsed by the current output frame
+  // - advanced by (1/fps)/multiplier per output frame (see nextRenderFrameFraction), so a bigger
+  // multiplier means game time advances more slowly relative to video time, i.e. stretches that
+  // portion of the recording over more output frames - exactly what slow motion is. ticksConsumed
+  // is how many PlaybackManager.tick() calls have actually been made so far to catch up to it; the
+  // gap between the two (always in [0, 1)) is the interpolation fraction PlaybackManager's own
+  // previous/current lerp uses for a smooth in-between camera position, instead of every output
+  // frame just duplicating whatever the latest raw tick happened to be.
+  private var gameSecondsElapsed = 0.0
+  private var ticksConsumed = 0L
+  private var lastRenderFraction = 1f
+
+  // Guards against PlaybackManager.tick() being called reentrantly - some packet handlers (e.g.
+  // login/respawn, via Minecraft.setLevel's loading-screen pump) call Minecraft.runTick()
+  // themselves *while already inside* a tick() call made from here, which would otherwise re-enter
+  // nextRenderFrameFraction/onFrameReady and read the next buffer record out of order mid-packet-
+  // handling (confirmed via a real crash log: nested login/chunk packet handling with null
+  // viewArea/player). This never came up with the old real-time-paced ticking (driven from a
+  // single safe point in Minecraft's own outer loop, never reentered this way).
+  private var tickInProgress = false
 
   // True while either an actual export is running, or we're waiting for a requested window resize
   // to take effect before one can start (see beginResize) - callers that need to know "is anything
@@ -308,11 +330,13 @@ object VideoExporter {
     currentOutputFrameIndex = -1L
     accumSamples = 0
     framesWritten = 0
-    startTimeNanos = System.nanoTime()
-    lastFrameNanos = startTimeNanos
     virtualElapsedSeconds = 0.0
+    gameSecondsElapsed = 0.0
+    ticksConsumed = 0L
+    lastRenderFraction = 1f
     this.sloMoRegions = sloMoRegions
     audioSpeedSegments.clear()
+    audioTicksElapsed = 0L
     segmentStartReal = 0.0
     segmentMultiplier = 1
 
@@ -326,7 +350,6 @@ object VideoExporter {
 
     // Not fatal if this fails - just export silent video, same as before audio capture existed.
     audioAvailable = AudioExporter.start(tempAudio)
-    audioOriginNanos = System.nanoTime()
     if (!audioAvailable) {
       LOGGER.warn("Audio capture unavailable - exporting without sound")
     }
@@ -336,11 +359,10 @@ object VideoExporter {
     return true
   }
 
-  // Rendering is normally capped to the display's refresh rate (vsync) or a configured fps limit
-  // - during export we want real frames to arrive as fast as the GPU can produce them, both so
-  // blendFactor has multiple genuinely distinct sub-frames to average per output frame, and so
-  // there's more than one real frame per tick at all on a slow-moving camera. Playback's own tick
-  // rate is untouched - this only affects how often we get a *new* rendered frame to sample.
+  // Rendering is normally capped to the display's refresh rate (vsync) or a configured fps limit -
+  // during export we want real frames to arrive as fast as the GPU can produce them, since each
+  // captured frame now also drives one playback tick directly (see onFrameReady) - this is what
+  // makes the whole export run as fast as possible instead of at real 20 ticks/sec.
   private fun uncapFramerate(mc: Minecraft) {
     originalFramerateLimit = mc.window.framerateLimit
     originalVsync = mc.options.enableVsync().get()
@@ -397,22 +419,21 @@ object VideoExporter {
       return
     }
 
-    if (audioAvailable) AudioExporter.pullSamples()
+    // Reentrancy guard: some packet handlers (e.g. login/respawn, via Minecraft.setLevel's
+    // loading-screen pump) call Minecraft.runTick() themselves *while already inside* a tick()
+    // call made from nextRenderFrameFraction (fired moments ago this same frame, via
+    // GameRendererMixin, before this WindowMixin-hooked function runs), which re-enters this
+    // function before the outer tick() has returned. Just skip capturing that inner pump frame
+    // entirely - it's an internal loading-screen frame, not real gameplay we want in the export
+    // anyway (confirmed via a real crash log otherwise: nested login/chunk packet handling with
+    // null viewArea/player from reading the next buffer record out of order mid-packet-handling).
+    if (tickInProgress) return
 
-    // Figure out which output frame's time window we're currently inside. Advancing our own
-    // virtual clock (instead of reading real elapsed time directly) is what lets a slow-motion
-    // region stretch itself over more output frames - see the field comment.
-    val now = System.nanoTime()
-    val realDeltaSeconds = (now - lastFrameNanos) / 1_000_000_000.0
-    lastFrameNanos = now
-    val multiplier = sloMoRegions.firstOrNull { PlaybackManager.currentTick in it.range }?.slowMultiplier ?: 1
-    if (audioAvailable && sloMoRegions.isNotEmpty() && multiplier != segmentMultiplier) {
-      val realElapsedSeconds = (now - audioOriginNanos) / 1_000_000_000.0
-      audioSpeedSegments.add(AudioSpeedSegment(segmentStartReal, realElapsedSeconds, segmentMultiplier))
-      segmentStartReal = realElapsedSeconds
-      segmentMultiplier = multiplier
-    }
-    virtualElapsedSeconds += realDeltaSeconds * multiplier
+    // Ticking (and audio pulling, and the audio-speed-segment bookkeeping) already happened just
+    // now via nextRenderFrameFraction, called from PlaybackManager.onRenderFrame earlier this same
+    // frame - every output frame is simply exactly 1/fps seconds of video, always (see the field
+    // comment on virtualElapsedSeconds).
+    virtualElapsedSeconds += 1.0 / fps
     val outputFrameIndex = (virtualElapsedSeconds * fps).toLong()
 
     val bytes = rowBytes ?: return
@@ -474,6 +495,55 @@ object VideoExporter {
     }
   }
 
+  // Called from PlaybackManager.onRenderFrame (via GameRendererMixin), once per real frame and
+  // *before* onFrameReady fires for that same frame (GameRenderer.render happens earlier in
+  // Minecraft's loop than Window.updateDisplay). Decides how much game time this next output frame
+  // should represent, ticks PlaybackManager forward to catch up (normally 0 or 1 calls - more only
+  // if rendering briefly outpaces 20 ticks/sec by a wide margin), and returns the fractional
+  // position between the last tick consumed and the next one, which PlaybackManager's own
+  // previous/current lerp uses to render a smooth in-between camera position instead of every
+  // output frame just duplicating whichever raw tick state happened to be current.
+  fun nextRenderFrameFraction(): Float {
+    if (!active) return 1f
+    // Reentrant call from inside our own tick() below (see tickInProgress's comment) - the
+    // fraction doesn't matter here since onFrameReady's own guard will skip capturing this inner
+    // pump frame entirely anyway; just don't touch any of the counters.
+    if (tickInProgress) return lastRenderFraction
+
+    val multiplier = sloMoRegions.firstOrNull { PlaybackManager.currentTick in it.range }?.slowMultiplier ?: 1
+    gameSecondsElapsed += (1.0 / fps) / multiplier
+    val targetTicks = (gameSecondsElapsed * 20.0).toLong()
+
+    if (targetTicks > ticksConsumed) {
+      tickInProgress = true
+      try {
+        while (ticksConsumed < targetTicks && PlaybackManager.active) {
+          PlaybackManager.tick()
+          ticksConsumed++
+          if (audioAvailable) {
+            AudioExporter.pullSamples()
+            audioTicksElapsed++
+          }
+          val tickMultiplier = sloMoRegions.firstOrNull { PlaybackManager.currentTick in it.range }?.slowMultiplier ?: 1
+          if (audioAvailable && sloMoRegions.isNotEmpty() && tickMultiplier != segmentMultiplier) {
+            val realElapsedSeconds = audioTicksElapsed * TICK_SECONDS
+            audioSpeedSegments.add(AudioSpeedSegment(segmentStartReal, realElapsedSeconds, segmentMultiplier))
+            segmentStartReal = realElapsedSeconds
+            segmentMultiplier = tickMultiplier
+          }
+        }
+      } finally {
+        tickInProgress = false
+      }
+    }
+
+    if (!PlaybackManager.active) return 1f
+
+    val fraction = ((gameSecondsElapsed * 20.0) - ticksConsumed).toFloat().coerceIn(0f, 1f)
+    lastRenderFraction = fraction
+    return fraction
+  }
+
   // Hands a *copy* of the frame off to the writer thread (see frameQueue's own comment) - a copy
   // because rowBytes/flushBytes get reused and overwritten on the very next call. The copy is
   // borrowed from freePool rather than freshly allocated (see its own comment for why), falling
@@ -510,7 +580,7 @@ object VideoExporter {
     active = false
     if (PlaybackManager.active) PlaybackManager.stop()
     if (audioAvailable && sloMoRegions.isNotEmpty()) {
-      val realElapsedSeconds = (System.nanoTime() - audioOriginNanos) / 1_000_000_000.0
+      val realElapsedSeconds = audioTicksElapsed * TICK_SECONDS
       audioSpeedSegments.add(AudioSpeedSegment(segmentStartReal, realElapsedSeconds, segmentMultiplier))
     }
     AudioExporter.stop()
@@ -577,7 +647,7 @@ object VideoExporter {
     audioSpeedSegments.clear()
     segmentStartReal = 0.0
     segmentMultiplier = 1
-    audioOriginNanos = 0L
+    audioTicksElapsed = 0L
     sloMoRegions = emptyList()
     virtualElapsedSeconds = 0.0
 
