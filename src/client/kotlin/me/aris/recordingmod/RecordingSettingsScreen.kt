@@ -142,7 +142,7 @@ class RecordingSettingsScreen(private val parent: Screen?) : Screen(Component.li
     y += 24
     blendFactorField = addField(
       labelX, y, "Blend Factor", fieldWidth, RecordingConfig.blendFactor.toString(),
-      "Not implemented yet - will control motion-blur frame blending"
+      "Max real frames averaged into each output frame for motion blur (rendering is uncapped during export to get distinct ones)"
     )
     y += 24
     proxyRenderingWidthField = addField(

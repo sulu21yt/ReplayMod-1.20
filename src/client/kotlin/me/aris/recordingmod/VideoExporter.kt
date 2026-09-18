@@ -15,11 +15,13 @@ import java.nio.ByteBuffer
 // compute shaders bound to Minecraft 1.12.2's internal framebuffer) with a much simpler pipeline:
 // pipe raw RGBA frames straight to an ffmpeg subprocess over stdin.
 //
-// This first version deliberately skips one thing the legacy renderer did: it runs in real time
-// (playback and capture both proceed at their natural pace, so exporting a 10-minute recording
-// takes about 10 real minutes) rather than decoupling from the display's real refresh rate to
-// render as fast as possible. Worth revisiting, but a correct real-time capture was the priority
-// for a first working export.
+// Playback still advances at its natural (real-time) pace - PlaybackManager.tick() is driven by
+// the normal client tick loop either way - but rendering is uncapped (fps limit removed, vsync
+// off) for the duration of an export, so real frames arrive faster than the target output fps.
+// That's also what makes RecordingConfig.blendFactor mean anything: each output frame's pixels
+// are the average of every real frame captured while playback was "inside" that output frame's
+// time window (capped at blendFactor samples), which is genuine motion blur since those are
+// actually distinct rendered moments, not the same frame copied onto itself.
 object VideoExporter {
   private val LOGGER = LoggerFactory.getLogger("recordingmod/export")
 
@@ -32,11 +34,24 @@ object VideoExporter {
   private var width = 0
   private var height = 0
   private var fps = 0
+  private var blendFactor = 1
   private var startTimeNanos = 0L
   private var framesWritten = 0L
   private var pixelBuffer: ByteBuffer? = null
   private var rowBytes: ByteArray? = null
+  private var flushBytes: ByteArray? = null
+  private var accumBuffer: IntArray? = null
   private var outputFile: File? = null
+
+  // Which output frame's worth of real frames we're currently accumulating into accumBuffer, and
+  // how many samples have gone into it so far (see onFrameReady/flushAccumulator). -1 means
+  // nothing captured yet.
+  private var currentOutputFrameIndex = -1L
+  private var accumSamples = 0
+
+  // Restored once export finishes - see uncapFramerate/restoreFramerate.
+  private var originalFramerateLimit = 0
+  private var originalVsync = true
 
   // The window size to restore once export finishes (only set if we actually resized it for
   // RecordingConfig.renderingWidth/Height / proxyRenderingWidth/Height - see beginResize).
@@ -156,6 +171,7 @@ object VideoExporter {
     width = mc.window.width and 1.inv()
     height = mc.window.height and 1.inv()
     fps = RecordingConfig.renderingFps.coerceIn(1, 240)
+    blendFactor = RecordingConfig.blendFactor.coerceAtLeast(1)
 
     outputFile.parentFile?.mkdirs()
     val command = listOf(
@@ -186,13 +202,20 @@ object VideoExporter {
     process = proc
     stdin = proc.outputStream
     this.outputFile = outputFile
-    pixelBuffer = BufferUtils.createByteBuffer(width * height * 4)
-    rowBytes = ByteArray(width * height * 4)
+    val frameSize = width * height * 4
+    pixelBuffer = BufferUtils.createByteBuffer(frameSize)
+    rowBytes = ByteArray(frameSize)
+    flushBytes = ByteArray(frameSize)
+    accumBuffer = IntArray(frameSize)
+    currentOutputFrameIndex = -1L
+    accumSamples = 0
     framesWritten = 0
     startTimeNanos = System.nanoTime()
     lastFrameNanos = startTimeNanos
     virtualElapsedSeconds = 0.0
     this.sloMoRegions = sloMoRegions
+
+    uncapFramerate(mc)
 
     if (startTick != null && endTick != null) {
       PlaybackManager.startRange(recordingFile, startTick, endTick)
@@ -202,6 +225,23 @@ object VideoExporter {
     active = true
     mc.player?.displayClientMessage(Component.literal("Exporting to $outputFile ..."), false)
     return true
+  }
+
+  // Rendering is normally capped to the display's refresh rate (vsync) or a configured fps limit
+  // - during export we want real frames to arrive as fast as the GPU can produce them, both so
+  // blendFactor has multiple genuinely distinct sub-frames to average per output frame, and so
+  // there's more than one real frame per tick at all on a slow-moving camera. Playback's own tick
+  // rate is untouched - this only affects how often we get a *new* rendered frame to sample.
+  private fun uncapFramerate(mc: Minecraft) {
+    originalFramerateLimit = mc.window.framerateLimit
+    originalVsync = mc.options.enableVsync().get()
+    mc.window.framerateLimit = 260
+    mc.window.updateVsync(false)
+  }
+
+  private fun restoreFramerate(mc: Minecraft) {
+    mc.window.framerateLimit = originalFramerateLimit
+    mc.window.updateVsync(originalVsync)
   }
 
   // Called from WindowMixin's hook on Window.updateDisplay() - once per real rendered frame,
@@ -248,17 +288,15 @@ object VideoExporter {
       return
     }
 
-    // Real frames may render faster or slower than the target output fps - figure out which
-    // output frame index we should be at by now, and only capture (or duplicate) up to that.
-    // Advancing our own virtual clock (instead of reading real elapsed time directly) is what
-    // lets a slow-motion region stretch itself over more output frames - see the field comment.
+    // Figure out which output frame's time window we're currently inside. Advancing our own
+    // virtual clock (instead of reading real elapsed time directly) is what lets a slow-motion
+    // region stretch itself over more output frames - see the field comment.
     val now = System.nanoTime()
     val realDeltaSeconds = (now - lastFrameNanos) / 1_000_000_000.0
     lastFrameNanos = now
     val multiplier = sloMoRegions.firstOrNull { PlaybackManager.currentTick in it.range }?.slowMultiplier ?: 1
     virtualElapsedSeconds += realDeltaSeconds * multiplier
-    val targetFrameIndex = (virtualElapsedSeconds * fps).toLong()
-    if (targetFrameIndex < framesWritten) return
+    val outputFrameIndex = (virtualElapsedSeconds * fps).toLong()
 
     val buffer = pixelBuffer ?: return
     val bytes = rowBytes ?: return
@@ -269,10 +307,33 @@ object VideoExporter {
     buffer.rewind()
     buffer.get(bytes)
 
+    if (currentOutputFrameIndex == -1L) currentOutputFrameIndex = outputFrameIndex
+
     try {
-      while (framesWritten <= targetFrameIndex) {
-        out.write(bytes)
-        framesWritten++
+      if (outputFrameIndex != currentOutputFrameIndex) {
+        // We've moved into a new output frame's window - emit whatever was accumulated for the
+        // one we just left (its average, i.e. the actual motion-blur result), then fill in any
+        // output frames that got skipped entirely (real fps far below target) by duplicating the
+        // latest raw frame, since there's no blended data for a window we never sampled at all.
+        flushAccumulator(out)
+        var idx = currentOutputFrameIndex + 1
+        while (idx < outputFrameIndex) {
+          out.write(bytes)
+          framesWritten++
+          idx++
+        }
+        currentOutputFrameIndex = outputFrameIndex
+        accumSamples = 0
+      }
+
+      if (accumSamples < blendFactor) {
+        val accum = accumBuffer
+        if (accum != null) {
+          for (i in bytes.indices) {
+            accum[i] += bytes[i].toInt() and 0xFF
+          }
+          accumSamples++
+        }
       }
     } catch (e: Exception) {
       LOGGER.warn("Failed writing frame to ffmpeg, stopping export", e)
@@ -280,10 +341,37 @@ object VideoExporter {
     }
   }
 
+  // Averages whatever's been accumulated for the output frame we're about to leave and writes it
+  // out - the "blend" in blend factor. A no-op if nothing was ever sampled for it (shouldn't
+  // normally happen, but harmless if it does).
+  private fun flushAccumulator(out: OutputStream) {
+    if (accumSamples == 0) return
+    val accum = accumBuffer ?: return
+    val flushed = flushBytes ?: return
+    for (i in flushed.indices) {
+      flushed[i] = (accum[i] / accumSamples).toByte()
+      accum[i] = 0
+    }
+    out.write(flushed)
+    framesWritten++
+  }
+
   fun stop() {
     if (!active) return
     active = false
     if (PlaybackManager.active) PlaybackManager.stop()
+
+    stdin?.let { out ->
+      try {
+        flushAccumulator(out)
+      } catch (e: Exception) {
+        LOGGER.warn("Failed writing final frame to ffmpeg", e)
+      }
+    }
+    currentOutputFrameIndex = -1L
+    accumSamples = 0
+
+    restoreFramerate(Minecraft.getInstance())
 
     val finishedFile = outputFile
     val finishingProcess = process
@@ -305,6 +393,8 @@ object VideoExporter {
     stdin = null
     pixelBuffer = null
     rowBytes = null
+    flushBytes = null
+    accumBuffer = null
     outputFile = null
     sloMoRegions = emptyList()
     virtualElapsedSeconds = 0.0
