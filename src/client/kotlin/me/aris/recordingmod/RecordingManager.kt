@@ -1,5 +1,6 @@
 package me.aris.recordingmod
 
+import com.mojang.datafixers.util.Pair
 import me.aris.recordingmod.RecordingFormat.BLOCK_BREAK_PROGRESS
 import me.aris.recordingmod.RecordingFormat.BLOCK_CHANGE
 import me.aris.recordingmod.RecordingFormat.LOCAL_LEVEL_EVENT
@@ -31,10 +32,12 @@ import net.minecraft.network.protocol.game.ClientboundRespawnPacket
 import net.minecraft.network.protocol.game.ClientboundSetChunkCacheCenterPacket
 import net.minecraft.network.protocol.game.ClientboundSetDefaultSpawnPositionPacket
 import net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket
+import net.minecraft.network.protocol.game.ClientboundSetEquipmentPacket
 import net.minecraft.network.protocol.game.ClientboundUpdateTagsPacket
 import net.minecraft.sounds.SoundEvent
 import net.minecraft.sounds.SoundSource
 import net.minecraft.world.InteractionHand
+import net.minecraft.world.entity.EquipmentSlot
 import net.minecraft.world.entity.LivingEntity
 import net.minecraft.world.entity.player.Player
 import net.minecraft.world.level.Level
@@ -243,6 +246,21 @@ object RecordingManager {
       val data = entity.entityData.nonDefaultValues
       if (data != null) {
         writePacket(ClientboundSetEntityDataPacket(entity.id, data))
+      }
+
+      // Worn armor/held items are their own "sent once near join" packet - ClientboundAddPlayerPacket/
+      // ClientboundAddEntityPacket + entity data don't carry them. A real server only sends
+      // ClientboundSetEquipmentPacket once on spawn and then incrementally on change, so an entity
+      // that equipped its gear before recording started (the common case - recording usually starts
+      // mid-session) would otherwise show up with empty armor/hand slots for the whole replay.
+      if (entity is LivingEntity) {
+        val equipment = EquipmentSlot.values().mapNotNull { slot ->
+          val stack = entity.getItemBySlot(slot)
+          if (stack.isEmpty) null else Pair.of(slot, stack)
+        }
+        if (equipment.isNotEmpty()) {
+          writePacket(ClientboundSetEquipmentPacket(entity.id, equipment))
+        }
       }
     }
   }
