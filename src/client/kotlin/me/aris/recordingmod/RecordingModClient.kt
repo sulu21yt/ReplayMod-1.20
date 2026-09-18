@@ -139,7 +139,10 @@ object RecordingModClient : ClientModInitializer {
       }
 
       RecordingManager.onClientTick()
-      if (PlaybackManager.active) {
+      // While exporting, VideoExporter drives PlaybackManager.tick() itself directly (once per
+      // captured frame, with no real-time pacing) so the export runs as fast as possible instead
+      // of waiting on Minecraft's own real 20 ticks/sec - ticking here too would double-tick.
+      if (PlaybackManager.active && !VideoExporter.active) {
         PlaybackManager.tick()
       }
     }

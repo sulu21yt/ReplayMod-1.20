@@ -345,15 +345,24 @@ object PlaybackManager {
   // a value that jumps once every tick (20 times a second).
   fun onRenderFrame(partialTick: Float) {
     if (!active) return
+
+    // During a fast (as-fast-as-possible) export, VideoExporter drives our tick() directly - not
+    // at Minecraft's real ~20/sec pace, which is also what the real partialTick argument is timed
+    // against, so it no longer means anything useful for us. nextRenderFrameFraction() ticks us
+    // forward as needed for this frame (possibly updating previous/current below) and returns the
+    // correct in-between fraction itself, so read it *before* previous/current rather than using
+    // the real partialTick.
+    val effectivePartialTick = if (VideoExporter.active) VideoExporter.nextRenderFrameFraction() else partialTick
+
     val from = previous ?: return
     val to = current ?: return
     val player = Minecraft.getInstance().player ?: return
 
-    val x = Mth.lerp(partialTick.toDouble(), from.x, to.x)
-    val y = Mth.lerp(partialTick.toDouble(), from.y, to.y)
-    val z = Mth.lerp(partialTick.toDouble(), from.z, to.z)
-    val yaw = Mth.rotLerp(partialTick, from.yaw, to.yaw)
-    val pitch = Mth.lerp(partialTick, from.pitch, to.pitch)
+    val x = Mth.lerp(effectivePartialTick.toDouble(), from.x, to.x)
+    val y = Mth.lerp(effectivePartialTick.toDouble(), from.y, to.y)
+    val z = Mth.lerp(effectivePartialTick.toDouble(), from.z, to.z)
+    val yaw = Mth.rotLerp(effectivePartialTick, from.yaw, to.yaw)
+    val pitch = Mth.lerp(effectivePartialTick, from.pitch, to.pitch)
 
     player.setPos(x, y, z)
     player.xo = x
