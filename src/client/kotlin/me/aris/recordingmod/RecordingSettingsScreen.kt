@@ -127,12 +127,12 @@ class RecordingSettingsScreen(private val parent: Screen?) : Screen(Component.li
     y += 14
     renderingWidthField = addField(
       labelX, y, "Rendering Width", fieldWidth, RecordingConfig.renderingWidth.toString(),
-      "Not applied yet - Export currently captures at the game's actual current window size"
+      "Output video width in pixels - the game window is resized to this for the duration of an Export/final render"
     )
     y += 24
     renderingHeightField = addField(
       labelX, y, "Rendering Height", fieldWidth, RecordingConfig.renderingHeight.toString(),
-      "Not applied yet - Export currently captures at the game's actual current window size"
+      "Output video height in pixels - the game window is resized to this for the duration of an Export/final render"
     )
     y += 24
     renderingFpsField = addField(
@@ -147,12 +147,12 @@ class RecordingSettingsScreen(private val parent: Screen?) : Screen(Component.li
     y += 24
     proxyRenderingWidthField = addField(
       labelX, y, "Proxy Rendering Width", fieldWidth, RecordingConfig.proxyRenderingWidth.toString(),
-      "Not applied yet - Render Blueprint Proxies currently captures at the game's actual current window size too"
+      "Output width in pixels for quick low-effort proxy renders - the window is resized to this instead while proxy-rendering"
     )
     y += 24
     proxyRenderingHeightField = addField(
       labelX, y, "Proxy Rendering Height", fieldWidth, RecordingConfig.proxyRenderingHeight.toString(),
-      "Not applied yet - Render Blueprint Proxies currently captures at the game's actual current window size too"
+      "Output height in pixels for quick low-effort proxy renders - the window is resized to this instead while proxy-rendering"
     )
 
     addRenderableWidget(

@@ -87,7 +87,10 @@ object BlueprintRenderer {
     }
     if (!started) return false
 
-    while (VideoExporter.active) {
+    // isBusy, not active: a requested window resize (see VideoExporter.requestStart) briefly
+    // leaves active=false before the real capture starts, which would otherwise let this loop
+    // exit immediately and race ahead to the next blueprint mid-resize.
+    while (VideoExporter.isBusy) {
       Thread.sleep(50)
     }
     return true
