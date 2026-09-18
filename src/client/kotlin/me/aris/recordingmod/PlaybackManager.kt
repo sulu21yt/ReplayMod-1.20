@@ -48,6 +48,10 @@ object PlaybackManager {
   private var buf: FriendlyByteBuf? = null
   private var listener: ClientPacketListenerHandle? = null
 
+  // Remembered purely so seekTo can restart playback from tick 0 for a backward seek - there's no
+  // keyframe format to jump within, so "rewind" really means "replay from the start again, fast".
+  private var currentFile: File? = null
+
   private data class LookState(val x: Double, val y: Double, val z: Double, val yaw: Float, val pitch: Float)
 
   private var previous: LookState? = null
@@ -103,6 +107,7 @@ object PlaybackManager {
 
     this.listener = ClientPacketListenerHandle(connection, packetListener)
     this.buf = FriendlyByteBuf(Unpooled.wrappedBuffer(file.readBytes()))
+    this.currentFile = file
     this.active = true
     LOGGER.info("Started playback of {}", file)
   }
@@ -113,6 +118,7 @@ object PlaybackManager {
     active = false
     buf = null
     listener = null
+    currentFile = null
     previous = null
     current = null
     stepMoveDist = 0f
@@ -129,14 +135,7 @@ object PlaybackManager {
   // snapshot format to seek within), muting sound for the duration (see isFastForwarding).
   fun startAtTick(file: File, targetTick: Int) {
     start(file)
-    isFastForwarding = true
-    try {
-      while (active && currentTick < targetTick) {
-        tick()
-      }
-    } finally {
-      isFastForwarding = false
-    }
+    fastForwardTo(targetTick)
   }
 
   // Starts playback of `file` and stops it automatically once `endTick` is reached, fast-forwarding
@@ -145,15 +144,34 @@ object PlaybackManager {
   fun startRange(file: File, startTick: Int, endTick: Int) {
     start(file)
     stopAtTick = endTick
-    if (startTick > 0) {
-      isFastForwarding = true
-      try {
-        while (active && currentTick < startTick) {
-          tick()
-        }
-      } finally {
-        isFastForwarding = false
+    if (startTick > 0) fastForwardTo(startTick)
+  }
+
+  // Jumps to an arbitrary tick while already watching a recording (as opposed to startAtTick,
+  // which only starts one) - the actual "scrubbing" during normal playback. Forward seeks just
+  // keep replaying from wherever we already are; backward seeks have to restart from tick 0 and
+  // fast-forward back up, same reasoning as startAtTick - there's no way to "un-apply" already
+  // -applied block changes, entity spawns etc. without a keyframe format we don't have.
+  fun seekTo(targetTick: Int) {
+    if (!active) return
+    val file = currentFile ?: return
+    val clamped = targetTick.coerceAtLeast(0)
+    if (clamped < currentTick) {
+      start(file)
+    }
+    fastForwardTo(clamped)
+  }
+
+  // Synchronously replays ticks (muting sound - see isFastForwarding) until currentTick reaches
+  // targetTick or the recording ends, whichever comes first.
+  private fun fastForwardTo(targetTick: Int) {
+    isFastForwarding = true
+    try {
+      while (active && currentTick < targetTick) {
+        tick()
       }
+    } finally {
+      isFastForwarding = false
     }
   }
 

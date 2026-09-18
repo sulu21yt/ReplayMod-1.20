@@ -56,6 +56,36 @@ object RecordingModClient : ClientModInitializer {
     "category.recordingmod"
   )
 
+  private val skipBack5Key = KeyMapping(
+    "key.recordingmod.skip_back_5s",
+    InputConstants.Type.KEYSYM,
+    InputConstants.UNKNOWN.value,
+    "category.recordingmod"
+  )
+
+  private val skipForward5Key = KeyMapping(
+    "key.recordingmod.skip_forward_5s",
+    InputConstants.Type.KEYSYM,
+    InputConstants.UNKNOWN.value,
+    "category.recordingmod"
+  )
+
+  private val skipBack30Key = KeyMapping(
+    "key.recordingmod.skip_back_30s",
+    InputConstants.Type.KEYSYM,
+    InputConstants.UNKNOWN.value,
+    "category.recordingmod"
+  )
+
+  private val skipForward30Key = KeyMapping(
+    "key.recordingmod.skip_forward_30s",
+    InputConstants.Type.KEYSYM,
+    InputConstants.UNKNOWN.value,
+    "category.recordingmod"
+  )
+
+  private const val TICKS_PER_SECOND = 20
+
   override fun onInitializeClient() {
     RecordingConfig.load()
 
@@ -65,6 +95,10 @@ object RecordingModClient : ClientModInitializer {
     KeyBindingHelper.registerKeyBinding(openRecordingsKey)
     KeyBindingHelper.registerKeyBinding(openSettingsKey)
     KeyBindingHelper.registerKeyBinding(markMomentKey)
+    KeyBindingHelper.registerKeyBinding(skipBack5Key)
+    KeyBindingHelper.registerKeyBinding(skipForward5Key)
+    KeyBindingHelper.registerKeyBinding(skipBack30Key)
+    KeyBindingHelper.registerKeyBinding(skipForward30Key)
 
     ClientTickEvents.END_CLIENT_TICK.register { mc ->
       while (toggleRecordingKey.consumeClick()) {
@@ -91,6 +125,18 @@ object RecordingModClient : ClientModInitializer {
       while (markMomentKey.consumeClick()) {
         markMoment()
       }
+      while (skipBack5Key.consumeClick()) {
+        skipSeconds(-5)
+      }
+      while (skipForward5Key.consumeClick()) {
+        skipSeconds(5)
+      }
+      while (skipBack30Key.consumeClick()) {
+        skipSeconds(-30)
+      }
+      while (skipForward30Key.consumeClick()) {
+        skipSeconds(30)
+      }
 
       RecordingManager.onClientTick()
       if (PlaybackManager.active) {
@@ -99,6 +145,20 @@ object RecordingModClient : ClientModInitializer {
     }
 
     LOGGER.info("Recording Mod (1.20.1 rewrite, milestone 1) initialized")
+  }
+
+  // Scrubbing during normal playback - not during an export, since VideoExporter relies on
+  // PlaybackManager's tick count progressing in lockstep with the frames it's capturing.
+  private fun skipSeconds(seconds: Int) {
+    if (!PlaybackManager.active || VideoExporter.active) return
+    val targetTick = PlaybackManager.currentTick + seconds * TICKS_PER_SECOND
+    PlaybackManager.seekTo(targetTick)
+    if (PlaybackManager.active) {
+      val mc = net.minecraft.client.Minecraft.getInstance()
+      mc.player?.displayClientMessage(
+        Component.literal("Skipped to ${PlaybackManager.currentTick / TICKS_PER_SECOND}s"), true
+      )
+    }
   }
 
   private fun markMoment() {
