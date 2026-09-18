@@ -9,9 +9,10 @@ import net.minecraft.client.gui.screens.Screen
 import net.minecraft.network.chat.Component
 
 // The recreated main menu from the legacy 1.12.2 mod's LiteLoader config panel. "Render
-// Blueprints"/"Render Blueprint Proxies"/"Generate Markers"/"Generate Blueprints From Markers" are
-// placeholders for now - they depend on the video-export pipeline (ffmpeg) and blueprint/slo-mo
-// system, neither of which exist yet in this port - hovering or clicking them tells you so.
+// Blueprints"/"Render Blueprint Proxies" render a blueprint's tick range to video (see
+// BlueprintRenderer/VideoExporter); "Generate Markers" scans recordings for Hypixel SkyBlock
+// Dungeons events (see MarkerGenerator); "Generate Blueprints From Markers" turns saved markers
+// into blueprints (see BlueprintManager).
 class RecordingSettingsScreen(private val parent: Screen?) : Screen(Component.literal("Recording Mod")) {
   // Section headers and field labels drawn in render() - EditBox itself has no visible label,
   // only an accessibility-narration title, so we draw both ourselves. isHeader picks the style.
@@ -28,15 +29,6 @@ class RecordingSettingsScreen(private val parent: Screen?) : Screen(Component.li
   private lateinit var blendFactorField: EditBox
   private lateinit var proxyRenderingWidthField: EditBox
   private lateinit var proxyRenderingHeightField: EditBox
-
-  private val notImplementedTooltip =
-    Tooltip.create(Component.literal("Not implemented yet - video export isn't built in this port yet"))
-
-  private fun notImplemented() {
-    this.minecraft?.player?.displayClientMessage(
-      Component.literal("Not implemented yet - video export isn't built in this port yet"), false
-    )
-  }
 
   override fun init() {
     labels.clear()
@@ -68,27 +60,47 @@ class RecordingSettingsScreen(private val parent: Screen?) : Screen(Component.li
     )
 
     y += 30
-    addSectionHeader(buttonsX, y, "Video Export (not implemented yet)")
+    addSectionHeader(buttonsX, y, "Video Export")
     y += 12
     addRenderableWidget(
-      Button.builder(Component.literal("Render Blueprints")) { notImplemented() }
-        .tooltip(notImplementedTooltip)
+      Button.builder(Component.literal("Render Blueprints")) {
+        BlueprintRenderer.renderAll(proxy = false)
+        this.minecraft?.setScreen(null)
+      }
+        .tooltip(Tooltip.create(Component.literal(
+          "Renders every blueprint that already has a proxy but no final render yet, to Final Render Path"
+        )))
         .bounds(buttonsX, y, buttonWidth, 20).build()
     )
     addRenderableWidget(
-      Button.builder(Component.literal("Render Blueprint Proxies")) { notImplemented() }
-        .tooltip(notImplementedTooltip)
+      Button.builder(Component.literal("Render Blueprint Proxies")) {
+        BlueprintRenderer.renderAll(proxy = true)
+        this.minecraft?.setScreen(null)
+      }
+        .tooltip(Tooltip.create(Component.literal("Renders a cheap preview of every blueprint that doesn't have one yet, to proxies/")))
         .bounds(buttonsX + buttonWidth + buttonSpacing, y, buttonWidth, 20).build()
     )
     y += 24
     addRenderableWidget(
-      Button.builder(Component.literal("Generate Markers")) { notImplemented() }
-        .tooltip(notImplementedTooltip)
+      Button.builder(Component.literal("Generate Markers")) {
+        val created = MarkerGenerator.generateForAllRecordings()
+        this.minecraft?.player?.displayClientMessage(
+          Component.literal("Generated $created marker(s) from recordings"), false
+        )
+      }
+        .tooltip(Tooltip.create(Component.literal(
+          "Scans every recording for Hypixel SkyBlock Dungeons events (deaths, drops, run start/complete/fail) and marks them"
+        )))
         .bounds(buttonsX, y, buttonWidth, 20).build()
     )
     addRenderableWidget(
-      Button.builder(Component.literal("Generate Blueprints From Markers")) { notImplemented() }
-        .tooltip(notImplementedTooltip)
+      Button.builder(Component.literal("Generate Blueprints From Markers")) {
+        val created = BlueprintManager.generateFromMarkers()
+        this.minecraft?.player?.displayClientMessage(
+          Component.literal("Generated $created blueprint(s) from markers"), false
+        )
+      }
+        .tooltip(Tooltip.create(Component.literal("Creates a blueprint (20s before to 5s after) around every saved marker")))
         .bounds(buttonsX + buttonWidth + buttonSpacing, y, buttonWidth, 20).build()
     )
 
@@ -135,12 +147,12 @@ class RecordingSettingsScreen(private val parent: Screen?) : Screen(Component.li
     y += 24
     proxyRenderingWidthField = addField(
       labelX, y, "Proxy Rendering Width", fieldWidth, RecordingConfig.proxyRenderingWidth.toString(),
-      "Output width in pixels for quick low-effort proxy renders"
+      "Not applied yet - Render Blueprint Proxies currently captures at the game's actual current window size too"
     )
     y += 24
     proxyRenderingHeightField = addField(
       labelX, y, "Proxy Rendering Height", fieldWidth, RecordingConfig.proxyRenderingHeight.toString(),
-      "Output height in pixels for quick low-effort proxy renders"
+      "Not applied yet - Render Blueprint Proxies currently captures at the game's actual current window size too"
     )
 
     addRenderableWidget(

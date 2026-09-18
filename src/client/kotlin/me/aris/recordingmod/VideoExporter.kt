@@ -38,10 +38,46 @@ object VideoExporter {
   private var rowBytes: ByteArray? = null
   private var outputFile: File? = null
 
+  // Slow-motion support (blueprint rendering only, see startBlueprintRender): instead of an
+  // absolute "elapsedSeconds = now - startTime" like the plain export used, we accumulate our own
+  // virtual clock frame-by-frame so it can be made to run slower than real time while the current
+  // tick falls inside a slow-motion region - which stretches that portion of the recording over
+  // more output frames, i.e. exactly what slow motion is. With no regions (the plain export path)
+  // this is numerically identical to the old absolute-time calculation.
+  private var sloMoRegions: List<BlueprintManager.SloMoRegion> = emptyList()
+  private var virtualElapsedSeconds = 0.0
+  private var lastFrameNanos = 0L
+
   // Returns true if the export actually started. Callers (e.g. RecordingsScreen) must check this
   // before closing themselves - if ffmpeg fails to launch, PlaybackManager.start() never runs, and
   // closing the screen anyway leaves the player staring at a blank world with no screen at all.
-  fun start(recordingFile: File, outputFile: File): Boolean {
+  fun start(recordingFile: File, outputFile: File): Boolean =
+    startInternal(recordingFile, outputFile, startTick = null, endTick = null, sloMoRegions = emptyList())
+
+  // Renders just a blueprint's tick range (optionally with its slow-motion regions applied) to
+  // either the proxy or final-quality output folder - see BlueprintRenderer for how a whole batch
+  // of these gets driven one after another.
+  fun startBlueprintRender(blueprint: BlueprintManager.Blueprint, proxy: Boolean): Boolean {
+    val recordingFile = File(RecordingConfig.recordingsDir, "${blueprint.recordingBaseName}.rec")
+    if (!recordingFile.exists()) {
+      LOGGER.warn("Recording {} for blueprint {} no longer exists", recordingFile, blueprint.file.name)
+      return false
+    }
+    val outDir = if (proxy) File("proxies") else File(RecordingConfig.finalRenderPath)
+    val outputFile = File(outDir, "${blueprint.baseName}.mp4")
+    return startInternal(
+      recordingFile, outputFile,
+      startTick = blueprint.startTick, endTick = blueprint.endTick, sloMoRegions = blueprint.sloMoRegions
+    )
+  }
+
+  private fun startInternal(
+    recordingFile: File,
+    outputFile: File,
+    startTick: Int?,
+    endTick: Int?,
+    sloMoRegions: List<BlueprintManager.SloMoRegion>
+  ): Boolean {
     if (active) return false
     val mc = Minecraft.getInstance()
 
@@ -84,8 +120,15 @@ object VideoExporter {
     rowBytes = ByteArray(width * height * 4)
     framesWritten = 0
     startTimeNanos = System.nanoTime()
+    lastFrameNanos = startTimeNanos
+    virtualElapsedSeconds = 0.0
+    this.sloMoRegions = sloMoRegions
 
-    PlaybackManager.start(recordingFile)
+    if (startTick != null && endTick != null) {
+      PlaybackManager.startRange(recordingFile, startTick, endTick)
+    } else {
+      PlaybackManager.start(recordingFile)
+    }
     active = true
     mc.player?.displayClientMessage(Component.literal("Exporting to $outputFile ..."), false)
     return true
@@ -103,8 +146,14 @@ object VideoExporter {
 
     // Real frames may render faster or slower than the target output fps - figure out which
     // output frame index we should be at by now, and only capture (or duplicate) up to that.
-    val elapsedSeconds = (System.nanoTime() - startTimeNanos) / 1_000_000_000.0
-    val targetFrameIndex = (elapsedSeconds * fps).toLong()
+    // Advancing our own virtual clock (instead of reading real elapsed time directly) is what
+    // lets a slow-motion region stretch itself over more output frames - see the field comment.
+    val now = System.nanoTime()
+    val realDeltaSeconds = (now - lastFrameNanos) / 1_000_000_000.0
+    lastFrameNanos = now
+    val multiplier = sloMoRegions.firstOrNull { PlaybackManager.currentTick in it.range }?.slowMultiplier ?: 1
+    virtualElapsedSeconds += realDeltaSeconds * multiplier
+    val targetFrameIndex = (virtualElapsedSeconds * fps).toLong()
     if (targetFrameIndex < framesWritten) return
 
     val buffer = pixelBuffer ?: return
@@ -153,5 +202,7 @@ object VideoExporter {
     pixelBuffer = null
     rowBytes = null
     outputFile = null
+    sloMoRegions = emptyList()
+    virtualElapsedSeconds = 0.0
   }
 }
