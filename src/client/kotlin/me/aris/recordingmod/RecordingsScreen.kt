@@ -7,23 +7,37 @@ import net.minecraft.network.chat.Component
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
+import kotlin.math.sign
 
 // A simple list of past recordings so you can watch one back later, not just the most recent one.
+// Scrollable with the mouse wheel once there are more than fit on screen.
 class RecordingsScreen(private val parent: Screen?) : Screen(Component.literal("Recordings")) {
   private val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss")
+  private var files: List<File> = emptyList()
+  private var scrollOffset = 0
+  private var maxVisible = 1
+
+  private val buttonWidth = 320
+  private val playButtonWidth = 244
+  private val exportButtonWidth = buttonWidth - playButtonWidth - 4
+  private val buttonHeight = 20
+  private val spacing = 4
+  private val startY = 40
 
   override fun init() {
-    val files = RecordingConfig.recordingsDir.listFiles { f -> f.extension == "rec" }
+    files = RecordingConfig.recordingsDir.listFiles { f -> f.extension == "rec" }
       ?.sortedByDescending { it.lastModified() }
       ?: emptyList()
+    maxVisible = ((this.height - startY - 40) / (buttonHeight + spacing)).coerceAtLeast(1)
+    scrollOffset = scrollOffset.coerceIn(0, maxScrollOffset())
 
-    val buttonWidth = 320
-    val playButtonWidth = 244
-    val exportButtonWidth = buttonWidth - playButtonWidth - 4
-    val buttonHeight = 20
-    val spacing = 4
-    val startY = 40
-    val maxVisible = ((this.height - startY - 40) / (buttonHeight + spacing)).coerceAtLeast(1)
+    rebuildList()
+  }
+
+  private fun maxScrollOffset() = (files.size - maxVisible).coerceAtLeast(0)
+
+  private fun rebuildList() {
+    clearWidgets()
 
     if (files.isEmpty()) {
       addRenderableWidget(
@@ -33,7 +47,7 @@ class RecordingsScreen(private val parent: Screen?) : Screen(Component.literal("
       ).active = false
     }
 
-    files.take(maxVisible).forEachIndexed { index, file ->
+    files.drop(scrollOffset).take(maxVisible).forEachIndexed { index, file ->
       val label = "${file.nameWithoutExtension} (${dateFormat.format(Date(file.lastModified()))})"
       val rowX = this.width / 2 - buttonWidth / 2
       val rowY = startY + index * (buttonHeight + spacing)
@@ -63,6 +77,16 @@ class RecordingsScreen(private val parent: Screen?) : Screen(Component.literal("
     )
   }
 
+  override fun mouseScrolled(mouseX: Double, mouseY: Double, delta: Double): Boolean {
+    if (maxScrollOffset() == 0) return super.mouseScrolled(mouseX, mouseY, delta)
+    val newOffset = (scrollOffset - delta.sign.toInt()).coerceIn(0, maxScrollOffset())
+    if (newOffset != scrollOffset) {
+      scrollOffset = newOffset
+      rebuildList()
+    }
+    return true
+  }
+
   override fun onClose() {
     this.minecraft?.setScreen(parent)
   }
@@ -71,5 +95,13 @@ class RecordingsScreen(private val parent: Screen?) : Screen(Component.literal("
     this.renderBackground(guiGraphics)
     super.render(guiGraphics, mouseX, mouseY, partialTick)
     guiGraphics.drawCenteredString(this.font, this.title, this.width / 2, 15, 0xFFFFFF)
+
+    if (files.size > maxVisible) {
+      val first = scrollOffset + 1
+      val last = (scrollOffset + maxVisible).coerceAtMost(files.size)
+      guiGraphics.drawCenteredString(
+        this.font, "$first-$last of ${files.size} (scroll for more)", this.width / 2, 27, 0xA0A0A0
+      )
+    }
   }
 }
