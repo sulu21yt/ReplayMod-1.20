@@ -59,6 +59,20 @@ object VideoExporter {
   private var tempAudioFile: File? = null
   private var audioAvailable = false
 
+  // Real game audio is captured at real, un-sped-up wall-clock pace (see AudioExporter) even
+  // during a slow-mo region, where the *video* clock below runs faster than real time to stretch
+  // that portion over more output frames. Left alone, the muxed audio track would end up shorter
+  // than its corresponding video segment and drift out of sync. Fixed at mux time instead of in
+  // AudioExporter itself: track the real-time (seconds since AudioExporter actually started, a
+  // separate clock from virtualElapsedSeconds below) span of each distinct multiplier the export
+  // passed through, then stretch each span's *already-captured* audio with ffmpeg's atempo filter
+  // to match how much longer the video got - see muxVideoAndAudio/atempoChain.
+  private data class AudioSpeedSegment(val realStart: Double, val realEnd: Double, val multiplier: Int)
+  private val audioSpeedSegments = mutableListOf<AudioSpeedSegment>()
+  private var audioOriginNanos = 0L
+  private var segmentStartReal = 0.0
+  private var segmentMultiplier = 1
+
   // Double-buffered pixel-pack buffer objects for asynchronous glReadPixels - see uncapFramerate's
   // comment for why the naive synchronous version defeated the whole point of uncapping fps. Each
   // frame we kick off a GPU-side copy into whichever PBO isn't currently "in flight", and read back
@@ -298,6 +312,9 @@ object VideoExporter {
     lastFrameNanos = startTimeNanos
     virtualElapsedSeconds = 0.0
     this.sloMoRegions = sloMoRegions
+    audioSpeedSegments.clear()
+    segmentStartReal = 0.0
+    segmentMultiplier = 1
 
     uncapFramerate(mc)
 
@@ -309,6 +326,7 @@ object VideoExporter {
 
     // Not fatal if this fails - just export silent video, same as before audio capture existed.
     audioAvailable = AudioExporter.start(tempAudio)
+    audioOriginNanos = System.nanoTime()
     if (!audioAvailable) {
       LOGGER.warn("Audio capture unavailable - exporting without sound")
     }
@@ -388,6 +406,12 @@ object VideoExporter {
     val realDeltaSeconds = (now - lastFrameNanos) / 1_000_000_000.0
     lastFrameNanos = now
     val multiplier = sloMoRegions.firstOrNull { PlaybackManager.currentTick in it.range }?.slowMultiplier ?: 1
+    if (audioAvailable && sloMoRegions.isNotEmpty() && multiplier != segmentMultiplier) {
+      val realElapsedSeconds = (now - audioOriginNanos) / 1_000_000_000.0
+      audioSpeedSegments.add(AudioSpeedSegment(segmentStartReal, realElapsedSeconds, segmentMultiplier))
+      segmentStartReal = realElapsedSeconds
+      segmentMultiplier = multiplier
+    }
     virtualElapsedSeconds += realDeltaSeconds * multiplier
     val outputFrameIndex = (virtualElapsedSeconds * fps).toLong()
 
@@ -485,6 +509,10 @@ object VideoExporter {
     if (!active) return
     active = false
     if (PlaybackManager.active) PlaybackManager.stop()
+    if (audioAvailable && sloMoRegions.isNotEmpty()) {
+      val realElapsedSeconds = (System.nanoTime() - audioOriginNanos) / 1_000_000_000.0
+      audioSpeedSegments.add(AudioSpeedSegment(segmentStartReal, realElapsedSeconds, segmentMultiplier))
+    }
     AudioExporter.stop()
 
     frameQueue?.let { flushAccumulator(it) }
@@ -497,6 +525,7 @@ object VideoExporter {
     val finishingTempVideo = tempVideoFile
     val finishingTempAudio = tempAudioFile
     val finishingAudioAvailable = audioAvailable
+    val finishingAudioSpeedSegments = audioSpeedSegments.toList()
     val finishingProcess = process
     val finishingStdin = stdin
     val finishingQueue = frameQueue
@@ -515,7 +544,7 @@ object VideoExporter {
 
         if (finishedFile != null && finishingTempVideo != null) {
           if (finishingAudioAvailable && finishingTempAudio != null && finishingTempAudio.exists()) {
-            muxVideoAndAudio(finishingTempVideo, finishingTempAudio, finishedFile)
+            muxVideoAndAudio(finishingTempVideo, finishingTempAudio, finishedFile, finishingAudioSpeedSegments)
             finishingTempVideo.delete()
             finishingTempAudio.delete()
           } else if (!finishingTempVideo.renameTo(finishedFile)) {
@@ -545,6 +574,10 @@ object VideoExporter {
     tempVideoFile = null
     tempAudioFile = null
     audioAvailable = false
+    audioSpeedSegments.clear()
+    segmentStartReal = 0.0
+    segmentMultiplier = 1
+    audioOriginNanos = 0L
     sloMoRegions = emptyList()
     virtualElapsedSeconds = 0.0
 
@@ -553,16 +586,53 @@ object VideoExporter {
 
   // Muxes the finished silent video and raw captured audio into the real output file. Runs
   // synchronously on the same background "finishing" thread that already waits for the video
-  // ffmpeg process, since it's off the render thread either way.
-  private fun muxVideoAndAudio(video: File, audio: File, output: File) {
-    val command = listOf(
-      RecordingConfig.ffmpegPath, "-y",
-      "-i", video.absolutePath,
-      "-f", "s16le", "-ar", AudioExporter.SAMPLE_RATE.toString(), "-ac", AudioExporter.CHANNELS.toString(),
-      "-i", audio.absolutePath,
-      "-c:v", "copy", "-c:a", "aac", "-shortest",
-      output.absolutePath
-    )
+  // ffmpeg process, since it's off the render thread either way. If any segment ran at other than
+  // 1x (a blueprint export with slow-mo regions - see AudioSpeedSegment's comment), each such span
+  // of the real-time-captured audio is time-stretched with atempo to match how much longer its
+  // corresponding video portion got, then all spans are concatenated back together; a plain export
+  // (no slow-mo) always has an all-1x segment list and takes the simple stream-copy path as before.
+  private fun muxVideoAndAudio(video: File, audio: File, output: File, segments: List<AudioSpeedSegment>) {
+    val usable = segments.filter { it.realEnd > it.realStart }
+    val needsFilter = usable.any { it.multiplier != 1 }
+
+    val command = if (!needsFilter) {
+      listOf(
+        RecordingConfig.ffmpegPath, "-y",
+        "-i", video.absolutePath,
+        "-f", "s16le", "-ar", AudioExporter.SAMPLE_RATE.toString(), "-ac", AudioExporter.CHANNELS.toString(),
+        "-i", audio.absolutePath,
+        "-c:v", "copy", "-c:a", "aac", "-shortest",
+        output.absolutePath
+      )
+    } else {
+      val filterParts = mutableListOf<String>()
+      val labels = mutableListOf<String>()
+      usable.forEachIndexed { i, seg ->
+        val label = "a$i"
+        val tempo = if (seg.multiplier != 1) {
+          "," + atempoChain(1.0 / seg.multiplier).joinToString(",") { "atempo=${fmtSeconds(it)}" }
+        } else {
+          ""
+        }
+        filterParts.add(
+          "[1:a]atrim=start=${fmtSeconds(seg.realStart)}:end=${fmtSeconds(seg.realEnd)},asetpts=PTS-STARTPTS$tempo[$label]"
+        )
+        labels.add("[$label]")
+      }
+      filterParts.add("${labels.joinToString("")}concat=n=${labels.size}:v=0:a=1[aout]")
+
+      listOf(
+        RecordingConfig.ffmpegPath, "-y",
+        "-i", video.absolutePath,
+        "-f", "s16le", "-ar", AudioExporter.SAMPLE_RATE.toString(), "-ac", AudioExporter.CHANNELS.toString(),
+        "-i", audio.absolutePath,
+        "-filter_complex", filterParts.joinToString(";"),
+        "-map", "0:v", "-map", "[aout]",
+        "-c:v", "copy", "-c:a", "aac", "-shortest",
+        output.absolutePath
+      )
+    }
+
     try {
       val proc = ProcessBuilder(command)
         .redirectError(ProcessBuilder.Redirect.appendTo(File(output.parentFile, "ffmpeg.log")))
@@ -571,6 +641,26 @@ object VideoExporter {
     } catch (e: Exception) {
       LOGGER.warn("Failed to mux audio into {}", output, e)
     }
+  }
+
+  private fun fmtSeconds(value: Double): String = String.format(java.util.Locale.ROOT, "%.4f", value)
+
+  // ffmpeg's atempo filter only accepts a factor in [0.5, 2.0] per node - chain multiple nodes to
+  // reach a bigger stretch/squeeze than a single node allows (e.g. a 4x slow-mo region needs an
+  // atempo factor of 0.25, split into two 0.5 nodes).
+  private fun atempoChain(factor: Double): List<Double> {
+    var remaining = factor
+    val chain = mutableListOf<Double>()
+    while (remaining < 0.5) {
+      chain.add(0.5)
+      remaining /= 0.5
+    }
+    while (remaining > 2.0) {
+      chain.add(2.0)
+      remaining /= 2.0
+    }
+    chain.add(remaining)
+    return chain
   }
 
   private fun restoreWindowSizeIfNeeded() {
