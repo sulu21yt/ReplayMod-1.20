@@ -3,13 +3,14 @@ package me.aris.recordingmod
 import net.minecraft.client.Minecraft
 import net.minecraft.client.gui.components.toasts.SystemToast
 import net.minecraft.network.chat.Component
-import org.lwjgl.BufferUtils
 import org.lwjgl.glfw.GLFW
 import org.lwjgl.opengl.GL11
+import org.lwjgl.opengl.GL15
+import org.lwjgl.opengl.GL21
 import org.slf4j.LoggerFactory
 import java.io.File
 import java.io.OutputStream
-import java.nio.ByteBuffer
+import java.util.concurrent.ArrayBlockingQueue
 
 // Replaces the legacy mod's native encoder (its source isn't in this repo, and it depended on
 // compute shaders bound to Minecraft 1.12.2's internal framebuffer) with a much simpler pipeline:
@@ -22,6 +23,12 @@ import java.nio.ByteBuffer
 // are the average of every real frame captured while playback was "inside" that output frame's
 // time window (capped at blendFactor samples), which is genuine motion blur since those are
 // actually distinct rendered moments, not the same frame copied onto itself.
+//
+// Frame capture uses double-buffered PBOs (see onFrameReady) instead of a plain synchronous
+// glReadPixels - measured directly on this project, a synchronous read capped real fps to ~60-90
+// even with vsync/the fps limit removed (vs. 300+ with the read skipped entirely), because
+// glReadPixels-into-client-memory forces the CPU to block until all pending GPU work finishes.
+// Reading back a PBO whose copy was queued a frame ago avoids that stall.
 object VideoExporter {
   private val LOGGER = LoggerFactory.getLogger("recordingmod/export")
 
@@ -37,11 +44,41 @@ object VideoExporter {
   private var blendFactor = 1
   private var startTimeNanos = 0L
   private var framesWritten = 0L
-  private var pixelBuffer: ByteBuffer? = null
   private var rowBytes: ByteArray? = null
   private var flushBytes: ByteArray? = null
   private var accumBuffer: IntArray? = null
   private var outputFile: File? = null
+
+  // Double-buffered pixel-pack buffer objects for asynchronous glReadPixels - see uncapFramerate's
+  // comment for why the naive synchronous version defeated the whole point of uncapping fps. Each
+  // frame we kick off a GPU-side copy into whichever PBO isn't currently "in flight", and read back
+  // the *other* one - whose copy was queued a frame ago and is essentially certain to be done by
+  // now - instead of blocking on this frame's own copy. That's one frame of latency, imperceptible
+  // for a video capture. pboFramesQueued tracks how many reads have been queued so far, since there
+  // is nothing valid to read back until the second call.
+  private var pbos: IntArray? = null
+  private var pboWriteIndex = 0
+  private var pboFramesQueued = 0
+
+  // Writing each frame to ffmpeg's stdin also happens on a background thread now, for the same
+  // reason capture moved off the render thread to PBOs: if ffmpeg can't encode fast enough (a
+  // heavy CRF like ours is real CPU work), its stdin pipe buffer fills up and a synchronous
+  // write() blocks until it drains - stalling rendering just as badly as the old glReadPixels did,
+  // just from the opposite end of the pipeline. The render thread only ever enqueues a frame
+  // (dropping it instead of blocking if the writer has fallen far behind - see enqueueFrame); the
+  // writer thread is the only thing that ever touches `stdin` directly.
+  private var frameQueue: ArrayBlockingQueue<ByteArray>? = null
+  private var writerThread: Thread? = null
+  private val STOP_SENTINEL = ByteArray(0)
+  private const val QUEUE_CAPACITY = 60
+
+  // A pool of reusable ~width*height*4-byte buffers, recycled between the render thread (borrows
+  // one, fills it, hands it to the writer) and the writer thread (returns it once written).
+  // Without this, every enqueued frame would need a fresh allocation - at a few hundred frames a
+  // second, a ~4MB frame means well over a gigabyte/sec of garbage, which is exactly the kind of
+  // thing that causes periodic GC pauses (a very plausible explanation for the fps oscillating
+  // between two bands instead of settling near the PBO fix's ceiling).
+  private var freePool: ArrayBlockingQueue<ByteArray>? = null
 
   // Which output frame's worth of real frames we're currently accumulating into accumBuffer, and
   // how many samples have gone into it so far (see onFrameReady/flushAccumulator). -1 means
@@ -200,13 +237,46 @@ object VideoExporter {
     }
 
     process = proc
-    stdin = proc.outputStream
+    val procStdin = proc.outputStream
+    stdin = procStdin
     this.outputFile = outputFile
     val frameSize = width * height * 4
-    pixelBuffer = BufferUtils.createByteBuffer(frameSize)
     rowBytes = ByteArray(frameSize)
     flushBytes = ByteArray(frameSize)
     accumBuffer = IntArray(frameSize)
+
+    val queue = ArrayBlockingQueue<ByteArray>(QUEUE_CAPACITY)
+    frameQueue = queue
+    val pool = ArrayBlockingQueue<ByteArray>(QUEUE_CAPACITY)
+    repeat(QUEUE_CAPACITY) { pool.put(ByteArray(frameSize)) }
+    freePool = pool
+    val writer = Thread({
+      try {
+        while (true) {
+          val frame = queue.take()
+          if (frame === STOP_SENTINEL) break
+          procStdin.write(frame)
+          pool.offer(frame)
+        }
+      } catch (e: Exception) {
+        LOGGER.warn("Error writing frames to ffmpeg", e)
+      }
+    }, "recordingmod-video-writer")
+    writer.isDaemon = true
+    writer.start()
+    writerThread = writer
+
+    val pboIds = IntArray(2)
+    GL15.glGenBuffers(pboIds)
+    for (id in pboIds) {
+      GL15.glBindBuffer(GL21.GL_PIXEL_PACK_BUFFER, id)
+      GL15.glBufferData(GL21.GL_PIXEL_PACK_BUFFER, frameSize.toLong(), GL15.GL_STREAM_READ)
+    }
+    GL15.glBindBuffer(GL21.GL_PIXEL_PACK_BUFFER, 0)
+    pbos = pboIds
+    pboWriteIndex = 0
+    pboFramesQueued = 0
+
     currentOutputFrameIndex = -1L
     accumSamples = 0
     framesWritten = 0
@@ -298,53 +368,86 @@ object VideoExporter {
     virtualElapsedSeconds += realDeltaSeconds * multiplier
     val outputFrameIndex = (virtualElapsedSeconds * fps).toLong()
 
-    val buffer = pixelBuffer ?: return
     val bytes = rowBytes ?: return
-    val out = stdin ?: return
+    val queue = frameQueue ?: return
+    val pboIds = pbos ?: return
 
-    buffer.clear()
-    GL11.glReadPixels(0, 0, width, height, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, buffer)
-    buffer.rewind()
-    buffer.get(bytes)
+    // Kick off an async GPU-side copy of *this* frame into the PBO that isn't currently in
+    // flight (the 0L "offset" means "into the bound buffer", not client memory, so this doesn't
+    // block), then read back whichever PBO's copy was queued last call - which is what makes this
+    // asynchronous: we're never waiting on the copy we just started, only one that's had a full
+    // frame to finish in the background.
+    val writeId = pboIds[pboWriteIndex]
+    val readIndex = 1 - pboWriteIndex
+    val readId = pboIds[readIndex]
+
+    GL15.glBindBuffer(GL21.GL_PIXEL_PACK_BUFFER, writeId)
+    GL11.glReadPixels(0, 0, width, height, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, 0L)
+
+    if (pboFramesQueued >= 1) {
+      GL15.glBindBuffer(GL21.GL_PIXEL_PACK_BUFFER, readId)
+      val mapped = GL15.glMapBuffer(GL21.GL_PIXEL_PACK_BUFFER, GL15.GL_READ_ONLY)
+      if (mapped != null) {
+        mapped.get(bytes)
+        GL15.glUnmapBuffer(GL21.GL_PIXEL_PACK_BUFFER)
+      }
+    }
+    GL15.glBindBuffer(GL21.GL_PIXEL_PACK_BUFFER, 0)
+
+    pboWriteIndex = readIndex
+    if (pboFramesQueued < 2) pboFramesQueued++
+    // Nothing valid to read back yet on the very first call - just let the pipeline fill up.
+    if (pboFramesQueued < 2) return
 
     if (currentOutputFrameIndex == -1L) currentOutputFrameIndex = outputFrameIndex
 
-    try {
-      if (outputFrameIndex != currentOutputFrameIndex) {
-        // We've moved into a new output frame's window - emit whatever was accumulated for the
-        // one we just left (its average, i.e. the actual motion-blur result), then fill in any
-        // output frames that got skipped entirely (real fps far below target) by duplicating the
-        // latest raw frame, since there's no blended data for a window we never sampled at all.
-        flushAccumulator(out)
-        var idx = currentOutputFrameIndex + 1
-        while (idx < outputFrameIndex) {
-          out.write(bytes)
-          framesWritten++
-          idx++
-        }
-        currentOutputFrameIndex = outputFrameIndex
-        accumSamples = 0
+    if (outputFrameIndex != currentOutputFrameIndex) {
+      // We've moved into a new output frame's window - emit whatever was accumulated for the
+      // one we just left (its average, i.e. the actual motion-blur result), then fill in any
+      // output frames that got skipped entirely (real fps far below target) by duplicating the
+      // latest raw frame, since there's no blended data for a window we never sampled at all.
+      flushAccumulator(queue)
+      var idx = currentOutputFrameIndex + 1
+      while (idx < outputFrameIndex) {
+        enqueueFrame(queue, bytes)
+        idx++
       }
+      currentOutputFrameIndex = outputFrameIndex
+      accumSamples = 0
+    }
 
-      if (accumSamples < blendFactor) {
-        val accum = accumBuffer
-        if (accum != null) {
-          for (i in bytes.indices) {
-            accum[i] += bytes[i].toInt() and 0xFF
-          }
-          accumSamples++
+    if (accumSamples < blendFactor) {
+      val accum = accumBuffer
+      if (accum != null) {
+        for (i in bytes.indices) {
+          accum[i] += bytes[i].toInt() and 0xFF
         }
+        accumSamples++
       }
-    } catch (e: Exception) {
-      LOGGER.warn("Failed writing frame to ffmpeg, stopping export", e)
-      stop()
     }
   }
 
-  // Averages whatever's been accumulated for the output frame we're about to leave and writes it
-  // out - the "blend" in blend factor. A no-op if nothing was ever sampled for it (shouldn't
+  // Hands a *copy* of the frame off to the writer thread (see frameQueue's own comment) - a copy
+  // because rowBytes/flushBytes get reused and overwritten on the very next call. The copy is
+  // borrowed from freePool rather than freshly allocated (see its own comment for why), falling
+  // back to a real allocation only if the pool's ever run dry. Drops the frame if the writer has
+  // fallen far enough behind to fill the queue, rather than blocking the render thread waiting for
+  // room - a dropped/duplicated frame here and there is far less noticeable than the render thread
+  // stalling on backpressure from ffmpeg's own encoding speed.
+  private fun enqueueFrame(queue: ArrayBlockingQueue<ByteArray>, bytes: ByteArray) {
+    val buf = freePool?.poll() ?: ByteArray(bytes.size)
+    System.arraycopy(bytes, 0, buf, 0, bytes.size)
+    if (!queue.offer(buf)) {
+      LOGGER.warn("Frame queue full (ffmpeg falling behind) - dropping a frame")
+      freePool?.offer(buf)
+    }
+    framesWritten++
+  }
+
+  // Averages whatever's been accumulated for the output frame we're about to leave and enqueues
+  // it - the "blend" in blend factor. A no-op if nothing was ever sampled for it (shouldn't
   // normally happen, but harmless if it does).
-  private fun flushAccumulator(out: OutputStream) {
+  private fun flushAccumulator(queue: ArrayBlockingQueue<ByteArray>) {
     if (accumSamples == 0) return
     val accum = accumBuffer ?: return
     val flushed = flushBytes ?: return
@@ -352,8 +455,7 @@ object VideoExporter {
       flushed[i] = (accum[i] / accumSamples).toByte()
       accum[i] = 0
     }
-    out.write(flushed)
-    framesWritten++
+    enqueueFrame(queue, flushed)
   }
 
   fun stop() {
@@ -361,13 +463,7 @@ object VideoExporter {
     active = false
     if (PlaybackManager.active) PlaybackManager.stop()
 
-    stdin?.let { out ->
-      try {
-        flushAccumulator(out)
-      } catch (e: Exception) {
-        LOGGER.warn("Failed writing final frame to ffmpeg", e)
-      }
-    }
+    frameQueue?.let { flushAccumulator(it) }
     currentOutputFrameIndex = -1L
     accumSamples = 0
 
@@ -376,11 +472,17 @@ object VideoExporter {
     val finishedFile = outputFile
     val finishingProcess = process
     val finishingStdin = stdin
+    val finishingQueue = frameQueue
+    val finishingWriter = writerThread
 
     // Finalizing the mp4 (ffmpeg flushing/closing the file) can take a moment - do it off the
-    // render thread so we don't freeze a frame while waiting for it.
+    // render thread so we don't freeze a frame while waiting for it. The writer thread must drain
+    // whatever's still queued and exit *before* we close stdin, or its last write(s) would race a
+    // closed stream.
     Thread {
       try {
+        finishingQueue?.put(STOP_SENTINEL)
+        finishingWriter?.join()
         finishingStdin?.close()
         finishingProcess?.waitFor()
         LOGGER.info("Finished exporting to {}", finishedFile)
@@ -389,9 +491,16 @@ object VideoExporter {
       }
     }.start()
 
+    pbos?.let { GL15.glDeleteBuffers(it) }
+    pbos = null
+    pboWriteIndex = 0
+    pboFramesQueued = 0
+    frameQueue = null
+    writerThread = null
+    freePool = null
+
     process = null
     stdin = null
-    pixelBuffer = null
     rowBytes = null
     flushBytes = null
     accumBuffer = null
