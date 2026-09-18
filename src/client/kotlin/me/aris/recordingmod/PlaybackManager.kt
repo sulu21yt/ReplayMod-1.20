@@ -74,6 +74,10 @@ object PlaybackManager {
   // what actually needs to be correct once we arrive) is applied normally either way.
   private var isFastForwarding = false
 
+  // Set by startRange (blueprint rendering only) - once currentTick reaches this, tick() stops
+  // playback on its own, the same way it already does on reaching end of file.
+  private var stopAtTick: Int? = null
+
   fun start(file: File) {
     resetState()
 
@@ -116,6 +120,7 @@ object PlaybackManager {
     wasInWater = false
     currentTick = 0
     isFastForwarding = false
+    stopAtTick = null
   }
 
   // Starts playback of `file` and immediately fast-forwards to `targetTick`, synchronously, before
@@ -131,6 +136,24 @@ object PlaybackManager {
       }
     } finally {
       isFastForwarding = false
+    }
+  }
+
+  // Starts playback of `file` and stops it automatically once `endTick` is reached, fast-forwarding
+  // (synchronously, same as startAtTick) past everything before `startTick` first. Used by
+  // VideoExporter to render just a blueprint's tick range instead of a whole recording.
+  fun startRange(file: File, startTick: Int, endTick: Int) {
+    start(file)
+    stopAtTick = endTick
+    if (startTick > 0) {
+      isFastForwarding = true
+      try {
+        while (active && currentTick < startTick) {
+          tick()
+        }
+      } finally {
+        isFastForwarding = false
+      }
     }
   }
 
@@ -177,6 +200,10 @@ object PlaybackManager {
         when (val id = buf.readVarInt()) {
           TICK_END -> {
             currentTick++
+            val stopTick = stopAtTick
+            if (stopTick != null && currentTick >= stopTick) {
+              stop()
+            }
             return
           }
           PLAYER_SNAPSHOT -> applySnapshot(buf)
