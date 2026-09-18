@@ -82,6 +82,16 @@ object PlaybackManager {
   // playback on its own, the same way it already does on reaching end of file.
   private var stopAtTick: Int? = null
 
+  // Guards against tick() being called reentrantly - some packet handlers (e.g. login/respawn, via
+  // Minecraft.setLevel's loading-screen pump) call Minecraft.runTick() themselves *while already
+  // inside* a tick() call, which can re-trigger another tick() before the outer one has returned
+  // (confirmed via a real crash log: nested packet handling reading the next buffer record out of
+  // order mid-packet-handling, eventually leaving `level` null for the rest of playback). This can
+  // happen via either caller - VideoExporter driving tick() directly during a fast export, or the
+  // normal real-time-paced ClientTickEvents.END_CLIENT_TICK call during ordinary playback - so the
+  // guard lives here, at the single actual entry point, rather than being each caller's problem.
+  private var tickInProgress = false
+
   fun start(file: File) {
     resetState()
 
@@ -204,6 +214,16 @@ object PlaybackManager {
 
   // Called from the main client thread at the end of every client tick, while active.
   fun tick() {
+    if (tickInProgress) return
+    tickInProgress = true
+    try {
+      tickInternal()
+    } finally {
+      tickInProgress = false
+    }
+  }
+
+  private fun tickInternal() {
     val buf = this.buf ?: return
     val handle = this.listener ?: return
 
@@ -305,7 +325,21 @@ object PlaybackManager {
     wasInWater = isInWater
 
     if (lastTick != null) {
-      maybePlayMovementSound(player, lastTick, newState, onGround, isInWater)
+      val dx = newState.x - lastTick.x
+      val dz = newState.z - lastTick.z
+      val horizontalDist = Mth.sqrt((dx * dx + dz * dz).toFloat())
+
+      // LivingEntity.calculateEntityAnimation() (which drives the third-person model's leg/limb
+      // swing animation, via LivingEntityRenderer reading player.walkAnimation) measures movement
+      // as getX() - xo each tick - but onRenderFrame below sets xo equal to the current position
+      // on every single render frame, so that delta is always ~zero and the walk animation never
+      // gets real movement speed. Same root issue as footstep sounds (see maybePlayMovementSound's
+      // comment - Entity.move() is never called during playback), just for animation instead of
+      // sound. Fixed the same way: reimplement the relevant bit (LivingEntity.updateWalkAnimation)
+      // ourselves, fed by our own already-computed tick-to-tick horizontal distance.
+      player.walkAnimation.update(horizontalDist.coerceAtMost(0.25f) * 4f, 0.4f)
+
+      maybePlayMovementSound(player, horizontalDist, onGround, isInWater)
     }
   }
 
@@ -314,10 +348,7 @@ object PlaybackManager {
   // again: accumulate horizontal distance moved since the last tick, and once it crosses the
   // threshold, play the real step or swim sound via the invoker mixin - mirroring the moveDist/
   // nextStep bookkeeping Entity.move() does internally for the same purpose.
-  private fun maybePlayMovementSound(player: Player, from: LookState, to: LookState, onGround: Boolean, isInWater: Boolean) {
-    val dx = to.x - from.x
-    val dz = to.z - from.z
-    val horizontalDist = Mth.sqrt((dx * dx + dz * dz).toFloat())
+  private fun maybePlayMovementSound(player: Player, horizontalDist: Float, onGround: Boolean, isInWater: Boolean) {
     stepMoveDist += horizontalDist * 0.6f
     if (stepMoveDist <= stepNextThreshold) return
     stepNextThreshold = stepMoveDist.toInt() + 1f
@@ -372,6 +403,25 @@ object PlaybackManager {
     player.setXRot(pitch)
     player.yRotO = yaw
     player.xRotO = pitch
+
+    // yBodyRot/yHeadRot (and their "O" counterparts) are what LivingEntityRenderer actually uses
+    // for the *third-person model's* torso/head orientation - separate fields from yRot/xRot above,
+    // normally smoothed once per real tick by LivingEntity.aiStep()'s tickHeadTurn(), completely
+    // independent of anything we do here. Since our camera-facing yaw/pitch now gets recomputed
+    // fresh every real render frame (many per tick), but yBodyRot/yHeadRot only ever changed once
+    // per tick, the third-person model visibly snapped/stuttered between ticks while the camera
+    // itself moved smoothly - invisible in first person (no body model drawn there at all), which
+    // is presumably why this went unnoticed until third person became reachable during playback.
+    // Matching them to the same already-smoothed yaw each frame (like every other field above)
+    // trades away the subtle natural lag of the body slowly catching up to a fast head turn, in
+    // exchange for eliminating the stutter entirely - judged an acceptable trade for this project.
+    // (A/B tested by temporarily disabling this - made no difference to a separately reported
+    // "choppy movement in open areas, playback only" symptom, so that has a different cause, but
+    // this is still worth keeping as its own real fix.)
+    player.yBodyRot = yaw
+    player.yBodyRotO = yaw
+    player.yHeadRot = yaw
+    player.yHeadRotO = yaw
   }
 
   private fun applyBlockChange(buf: FriendlyByteBuf) {

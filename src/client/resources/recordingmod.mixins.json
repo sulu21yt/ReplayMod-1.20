@@ -12,6 +12,7 @@
     "LevelPlaySoundMixin",
     "LibraryMixin",
     "LivingEntitySwingMixin",
+    "LocalPlayerAiStepMixin",
     "MinecraftHandleKeybindsMixin",
     "ParticleEngineMixin",
     "WindowMixin"
