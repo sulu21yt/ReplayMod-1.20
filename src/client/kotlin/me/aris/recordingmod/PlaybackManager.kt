@@ -78,6 +78,14 @@ object PlaybackManager {
   var currentTick = 0
     private set
 
+  // Length of the current recording, in ticks, for the playback timeline (see
+  // PlaybackTimelineScreen) - null if there's no sidecar metadata for it (see RecordingMetadata),
+  // e.g. a recording made before this feature existed, or an interrupted one that never stopped
+  // cleanly. Callers just treat null as "unknown length" rather than falling back to a full scan.
+  @Volatile
+  var totalTicks: Int? = null
+    private set
+
   // While fast-forwarding to a marker (see startAtTick), every tick between 0 and the target
   // flies by near-instantly - playing every sound that would normally happen along the way would
   // be a deafening burst of noise instead of a clean jump. Real sound packets and our own
@@ -125,6 +133,7 @@ object PlaybackManager {
     this.listener = ClientPacketListenerHandle(connection, packetListener)
     this.buf = FriendlyByteBuf(Unpooled.wrappedBuffer(file.readBytes()))
     this.currentFile = file
+    this.totalTicks = RecordingMetadata.readTotalTicks(file)
     this.active = true
     LOGGER.info("Started playback of {}", file)
   }
@@ -144,6 +153,7 @@ object PlaybackManager {
     smoothedDx = 0.0
     smoothedDz = 0.0
     currentTick = 0
+    totalTicks = null
     isFastForwarding = false
     stopAtTick = null
   }
@@ -176,7 +186,17 @@ object PlaybackManager {
     val file = currentFile ?: return
     val clamped = targetTick.coerceAtLeast(0)
     if (clamped < currentTick) {
+      // start() re-processes the recording's cached login packet, and vanilla's own
+      // ClientPacketListener.handleLogin() unconditionally opens a ReceivingLevelScreen - normally
+      // fine for a real, slow network join, but jarring here where everything resolves instantly
+      // and synchronously (fastForwardTo, below, doesn't return until it's done) and it stomps
+      // whatever screen the caller (e.g. PlaybackTimelineScreen) already had open. Put back whatever
+      // was open before the restart, once the whole synchronous rebuild is done.
+      val screenBefore = Minecraft.getInstance().screen
       start(file)
+      fastForwardTo(clamped)
+      Minecraft.getInstance().setScreen(screenBefore)
+      return
     }
     fastForwardTo(clamped)
   }

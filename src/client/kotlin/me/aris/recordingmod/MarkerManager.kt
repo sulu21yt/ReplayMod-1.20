@@ -2,8 +2,9 @@ package me.aris.recordingmod
 
 import java.io.File
 
-// Markers let you bookmark a moment while recording live (see MarkMomentScreen) and jump straight
-// to it later from MarkersScreen, without having to scrub through the whole recording manually.
+// Markers let you bookmark a moment while recording live (see RecordingModClient.markMoment) and
+// jump straight to it later from MarkersScreen, without having to scrub through the whole
+// recording manually.
 // A marker is just a file "markers/<name>-<recordingBaseName>" whose content is the tick number -
 // same on-disk format the legacy 1.12.2 mod used, so old marker files still work.
 object MarkerManager {
@@ -34,5 +35,18 @@ object MarkerManager {
       safeName += "_"
     }
     File(dir, "$safeName-$recordingBaseName").writeText(tick.toString())
+  }
+
+  // Renames a marker in place (from MarkersScreen, after the fact) - marking a moment itself no
+  // longer asks for a name up front (see RecordingModClient.markMoment), so this is the only way
+  // to give one a meaningful name.
+  fun rename(marker: Marker, newName: String): Boolean {
+    var safeName = newName.replace(Regex("[\\\\/:*?\"<>|]"), "_")
+    var target = File(dir, "$safeName-${marker.recordingBaseName}")
+    while (target.exists() && target != marker.file) {
+      safeName += "_"
+      target = File(dir, "$safeName-${marker.recordingBaseName}")
+    }
+    return marker.file.renameTo(target)
   }
 }

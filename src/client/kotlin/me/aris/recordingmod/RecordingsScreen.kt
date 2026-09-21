@@ -1,9 +1,12 @@
 package me.aris.recordingmod
 
+import com.mojang.blaze3d.platform.NativeImage
 import net.minecraft.client.gui.GuiGraphics
 import net.minecraft.client.gui.components.Button
 import net.minecraft.client.gui.screens.Screen
+import net.minecraft.client.renderer.texture.DynamicTexture
 import net.minecraft.network.chat.Component
+import net.minecraft.resources.ResourceLocation
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -17,9 +20,20 @@ class RecordingsScreen(private val parent: Screen?) : Screen(Component.literal("
   private var scrollOffset = 0
   private var maxVisible = 1
 
+  // Textures for the currently visible page's thumbnails only - re-registered (and the previous
+  // batch released) every rebuildList(), so we never accumulate GPU textures for rows scrolled
+  // past or recordings that no longer exist. Width/height are the actual screenshot's pixel size
+  // (needed for blit's UV mapping) - not the small size it's drawn at.
+  private data class Thumbnail(val location: ResourceLocation, val width: Int, val height: Int)
+  private var thumbnails: List<Thumbnail?> = emptyList()
+
+  private val thumbnailWidth = 32
+  private val thumbnailHeight = 18
+  private val thumbnailGap = 4
   private val buttonWidth = 320
-  private val playButtonWidth = 244
-  private val exportButtonWidth = buttonWidth - playButtonWidth - 4
+  private val playButtonWidth = 180
+  private val exportButtonWidth = 60
+  private val renameButtonWidth = buttonWidth - playButtonWidth - exportButtonWidth - 8
   private val buttonHeight = 20
   private val spacing = 4
   private val startY = 40
@@ -34,10 +48,34 @@ class RecordingsScreen(private val parent: Screen?) : Screen(Component.literal("
     rebuildList()
   }
 
+  override fun removed() {
+    releaseThumbnails()
+  }
+
+  private fun releaseThumbnails() {
+    thumbnails.forEach { it?.let { t -> this.minecraft?.textureManager?.release(t.location) } }
+    thumbnails = emptyList()
+  }
+
+  private fun loadThumbnail(index: Int, file: File): Thumbnail? {
+    val thumbFile = RecordingMetadata.thumbnailFile(file)
+    if (!thumbFile.exists()) return null
+    return runCatching {
+      val image = thumbFile.inputStream().use { NativeImage.read(it) }
+      val location = ResourceLocation("recordingmod", "recording_thumbnail_$index")
+      this.minecraft?.textureManager?.register(location, DynamicTexture(image))
+      Thumbnail(location, image.width, image.height)
+    }.getOrNull()
+  }
+
   private fun maxScrollOffset() = (files.size - maxVisible).coerceAtLeast(0)
+
+  private fun rowX() = this.width / 2 - (thumbnailWidth + thumbnailGap + buttonWidth) / 2
+  private fun buttonsX() = rowX() + thumbnailWidth + thumbnailGap
 
   private fun rebuildList() {
     clearWidgets()
+    releaseThumbnails()
 
     if (files.isEmpty()) {
       addRenderableWidget(
@@ -47,15 +85,18 @@ class RecordingsScreen(private val parent: Screen?) : Screen(Component.literal("
       ).active = false
     }
 
-    files.drop(scrollOffset).take(maxVisible).forEachIndexed { index, file ->
+    val visible = files.drop(scrollOffset).take(maxVisible)
+    thumbnails = visible.mapIndexed { index, file -> loadThumbnail(index, file) }
+
+    visible.forEachIndexed { index, file ->
       val label = "${file.nameWithoutExtension} (${dateFormat.format(Date(file.lastModified()))})"
-      val rowX = this.width / 2 - buttonWidth / 2
+      val bx = buttonsX()
       val rowY = startY + index * (buttonHeight + spacing)
       addRenderableWidget(
         Button.builder(Component.literal(label)) {
           PlaybackManager.start(file)
           this.minecraft?.setScreen(null)
-        }.bounds(rowX, rowY, playButtonWidth, buttonHeight).build()
+        }.bounds(bx, rowY, playButtonWidth, buttonHeight).build()
       )
       addRenderableWidget(
         Button.builder(Component.literal("Export")) {
@@ -66,7 +107,12 @@ class RecordingsScreen(private val parent: Screen?) : Screen(Component.literal("
           if (VideoExporter.start(file, output)) {
             this.minecraft?.setScreen(null)
           }
-        }.bounds(rowX + playButtonWidth + 4, rowY, exportButtonWidth, buttonHeight).build()
+        }.bounds(bx + playButtonWidth + 4, rowY, exportButtonWidth, buttonHeight).build()
+      )
+      addRenderableWidget(
+        Button.builder(Component.literal("Rename")) {
+          this.minecraft?.setScreen(RenameRecordingScreen(file, this))
+        }.bounds(bx + playButtonWidth + 4 + exportButtonWidth + 4, rowY, renameButtonWidth, buttonHeight).build()
       )
     }
 
@@ -95,6 +141,20 @@ class RecordingsScreen(private val parent: Screen?) : Screen(Component.literal("
     this.renderBackground(guiGraphics)
     super.render(guiGraphics, mouseX, mouseY, partialTick)
     guiGraphics.drawCenteredString(this.font, this.title, this.width / 2, 15, 0xFFFFFF)
+
+    val rx = rowX()
+    thumbnails.forEachIndexed { index, thumbnail ->
+      if (thumbnail == null) return@forEachIndexed
+      val rowY = startY + index * (buttonHeight + spacing) + (buttonHeight - thumbnailHeight) / 2
+
+      // blit has no scale-to-fit overload, only 1:1 crop - draw at full source size inside a
+      // scaled pose instead, so an arbitrary-resolution screenshot shrinks to the thumbnail box.
+      guiGraphics.pose().pushPose()
+      guiGraphics.pose().translate(rx.toDouble(), rowY.toDouble(), 0.0)
+      guiGraphics.pose().scale(thumbnailWidth.toFloat() / thumbnail.width, thumbnailHeight.toFloat() / thumbnail.height, 1f)
+      guiGraphics.blit(thumbnail.location, 0, 0, 0f, 0f, thumbnail.width, thumbnail.height, thumbnail.width, thumbnail.height)
+      guiGraphics.pose().popPose()
+    }
 
     if (files.size > maxVisible) {
       val first = scrollOffset + 1

@@ -7,33 +7,33 @@ import net.minecraft.client.gui.screens.Screen
 import net.minecraft.network.chat.Component
 import org.lwjgl.glfw.GLFW
 
-// Opened by the "mark moment" keybind while recording live, so you can bookmark a cool moment
-// (by name) and jump straight back to it later from MarkersScreen, instead of scrubbing through
-// the whole recording. Only usable while actively recording, since a marker needs to know both
-// which file and which tick it's pointing at (see RecordingManager.currentFile/currentTick).
-class MarkMomentScreen(private val recordingFile: java.io.File, private val tick: Int) :
-  Screen(Component.literal("Mark Moment")) {
+// Opened from MarkersScreen's "Rename" button - the only way to give a marker a real name, since
+// marking a moment live (see RecordingModClient.markMoment) no longer asks for one up front.
+class RenameMarkerScreen(private val marker: MarkerManager.Marker, private val parent: Screen?) :
+  Screen(Component.literal("Rename Marker")) {
   private lateinit var nameField: EditBox
 
   override fun init() {
     nameField = EditBox(this.font, this.width / 2 - 100, this.height / 2 - 30, 200, 20, Component.literal("Marker name"))
     nameField.setMaxLength(128)
+    nameField.value = marker.name
     nameField.setFocused(true)
     addRenderableWidget(nameField)
     setInitialFocus(nameField)
 
     addRenderableWidget(
-      Button.builder(Component.literal("Save Marker")) { save() }
+      Button.builder(Component.literal("Save")) { save() }
         .bounds(this.width / 2 - 50, this.height / 2, 100, 20)
         .build()
     )
   }
 
   private fun save() {
-    val name = nameField.value.ifBlank { "marker" }
-    MarkerManager.save(name, recordingFile.nameWithoutExtension, tick)
-    this.minecraft?.setScreen(null)
-    this.minecraft?.player?.displayClientMessage(Component.literal("Saved marker \"$name\""), false)
+    val newName = nameField.value.trim()
+    if (newName.isNotEmpty() && newName != marker.name) {
+      MarkerManager.rename(marker, newName)
+    }
+    onClose()
   }
 
   override fun keyPressed(keyCode: Int, scanCode: Int, modifiers: Int): Boolean {
@@ -42,6 +42,10 @@ class MarkMomentScreen(private val recordingFile: java.io.File, private val tick
       return true
     }
     return super.keyPressed(keyCode, scanCode, modifiers)
+  }
+
+  override fun onClose() {
+    this.minecraft?.setScreen(parent)
   }
 
   override fun render(guiGraphics: GuiGraphics, mouseX: Int, mouseY: Int, partialTick: Float) {

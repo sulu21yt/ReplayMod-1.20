@@ -16,6 +16,8 @@ class MarkersScreen(private val parent: Screen?) : Screen(Component.literal("Mar
   private var maxVisible = 1
 
   private val buttonWidth = 320
+  private val jumpButtonWidth = 256
+  private val renameButtonWidth = buttonWidth - jumpButtonWidth - 4
   private val buttonHeight = 20
   private val spacing = 4
   private val startY = 40
@@ -43,6 +45,8 @@ class MarkersScreen(private val parent: Screen?) : Screen(Component.literal("Mar
 
     markers.drop(scrollOffset).take(maxVisible).forEachIndexed { index, marker ->
       val label = "${marker.name} (${marker.recordingBaseName}, tick ${marker.tick})"
+      val rowX = this.width / 2 - buttonWidth / 2
+      val rowY = startY + index * (buttonHeight + spacing)
       addRenderableWidget(
         Button.builder(Component.literal(label)) {
           val recordingFile = File(RecordingConfig.recordingsDir, "${marker.recordingBaseName}.rec")
@@ -54,12 +58,12 @@ class MarkersScreen(private val parent: Screen?) : Screen(Component.literal("Mar
           }
           PlaybackManager.startAtTick(recordingFile, marker.tick)
           this.minecraft?.setScreen(null)
-        }.bounds(
-          this.width / 2 - buttonWidth / 2,
-          startY + index * (buttonHeight + spacing),
-          buttonWidth,
-          buttonHeight
-        ).build()
+        }.bounds(rowX, rowY, jumpButtonWidth, buttonHeight).build()
+      )
+      addRenderableWidget(
+        Button.builder(Component.literal("Rename")) {
+          this.minecraft?.setScreen(RenameMarkerScreen(marker, this))
+        }.bounds(rowX + jumpButtonWidth + 4, rowY, renameButtonWidth, buttonHeight).build()
       )
     }
 

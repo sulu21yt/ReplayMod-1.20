@@ -120,6 +120,10 @@ object RecordingManager {
   }
 
   private fun stopInternal() {
+    val wasActive = active
+    val finishedFile = currentFile
+    val finishedTicks = currentTick
+
     active = false
     currentFile = null
     out?.let {
@@ -127,6 +131,32 @@ object RecordingManager {
       it.close()
     }
     out = null
+
+    if (wasActive && finishedFile != null) {
+      saveMetadataAndThumbnail(finishedFile, finishedTicks)
+    }
+  }
+
+  // Captures how long the just-finished recording was (for the playback timeline - see
+  // RecordingMetadata) and a thumbnail frame for RecordingsScreen. Screenshot.takeScreenshot reads
+  // the current GL texture, so it has to run on the render thread - recordRenderCall runs it right
+  // away if we're already there (true for every caller today) and queues it otherwise.
+  private fun saveMetadataAndThumbnail(file: File, totalTicks: Int) {
+    RecordingMetadata.save(file, totalTicks)
+
+    com.mojang.blaze3d.systems.RenderSystem.recordRenderCall {
+      val mc = Minecraft.getInstance()
+      val image = net.minecraft.client.Screenshot.takeScreenshot(mc.mainRenderTarget)
+      net.minecraft.Util.ioPool().execute {
+        try {
+          image.writeToFile(RecordingMetadata.thumbnailFile(file))
+        } catch (e: Exception) {
+          LOGGER.warn("Failed to save thumbnail for {}", file, e)
+        } finally {
+          image.close()
+        }
+      }
+    }
   }
 
   // Called from ConnectionMixin, on the network (Netty) thread - NOT the main client thread.

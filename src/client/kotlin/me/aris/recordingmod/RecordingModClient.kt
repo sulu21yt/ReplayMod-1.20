@@ -84,6 +84,13 @@ object RecordingModClient : ClientModInitializer {
     "category.recordingmod"
   )
 
+  private val openTimelineKey = KeyMapping(
+    "key.recordingmod.open_timeline",
+    InputConstants.Type.KEYSYM,
+    InputConstants.UNKNOWN.value,
+    "category.recordingmod"
+  )
+
   private const val TICKS_PER_SECOND = 20
 
   override fun onInitializeClient() {
@@ -99,6 +106,7 @@ object RecordingModClient : ClientModInitializer {
     KeyBindingHelper.registerKeyBinding(skipForward5Key)
     KeyBindingHelper.registerKeyBinding(skipBack30Key)
     KeyBindingHelper.registerKeyBinding(skipForward30Key)
+    KeyBindingHelper.registerKeyBinding(openTimelineKey)
 
     ClientTickEvents.END_CLIENT_TICK.register { mc ->
       while (toggleRecordingKey.consumeClick()) {
@@ -137,6 +145,11 @@ object RecordingModClient : ClientModInitializer {
       while (skipForward30Key.consumeClick()) {
         skipSeconds(30)
       }
+      while (openTimelineKey.consumeClick()) {
+        if (PlaybackManager.active && mc.screen == null) {
+          mc.setScreen(PlaybackTimelineScreen())
+        }
+      }
 
       RecordingManager.onClientTick()
       // While exporting, VideoExporter drives PlaybackManager.tick() itself directly (once per
@@ -164,9 +177,11 @@ object RecordingModClient : ClientModInitializer {
     }
   }
 
+  // Saves instantly with an elapsed-time default name (e.g. "1:23") instead of opening a screen to
+  // type one - typing a name would grab keyboard/mouse focus and interrupt whatever you're
+  // actually doing at the moment you wanted to mark. Rename it afterward from MarkersScreen instead.
   private fun markMoment() {
     val mc = net.minecraft.client.Minecraft.getInstance()
-    if (mc.screen != null) return
 
     val file = RecordingManager.currentFile
     if (!RecordingManager.active || file == null) {
@@ -174,7 +189,11 @@ object RecordingModClient : ClientModInitializer {
       return
     }
 
-    mc.setScreen(MarkMomentScreen(file, RecordingManager.currentTick))
+    val tick = RecordingManager.currentTick
+    val totalSeconds = tick / TICKS_PER_SECOND
+    val name = "%d:%02d".format(totalSeconds / 60, totalSeconds % 60)
+    MarkerManager.save(name, file.nameWithoutExtension, tick)
+    mc.player?.displayClientMessage(Component.literal("Marked moment ($name)"), true)
   }
 
   private fun toggleRecording() {
