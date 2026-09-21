@@ -334,18 +334,35 @@ object PlaybackManager {
     wasInWater = isInWater
 
     if (lastTick != null) {
+      // Vanilla's real per-tick contract for xo/yo/zo/xRotO/yRotO is "value at the START of this
+      // tick" (set once, before that tick's own movement), left in place for the renderer's own
+      // Mth.lerp(partialTick, old, current) to interpolate across every frame of the NEXT tick
+      // period - used well beyond just the main position lerp, e.g. CapeLayer's cloak-swing offset
+      // (Mth.lerp(h, xo, getX())) and ItemInHandRenderer's hand-bob pitch lerp. onRenderFrame used
+      // to overwrite these same fields to always equal the current value on every single render
+      // frame (originally to feed our own manual per-frame lerp without vanilla "double
+      // interpolating" on top of it) - which broke walk animation (fixed below) but silently left
+      // every OTHER consumer of these fields collapsed to a no-op lerp too, since old==current
+      // always. Fixed at the root instead of per-symptom: set the real "start of tick" value here,
+      // once per tick, and let onRenderFrame (see below) only ever move the *current* value.
+      player.xo = lastTick.x
+      player.yo = lastTick.y
+      player.zo = lastTick.z
+      player.xRotO = lastTick.pitch
+      player.yRotO = lastTick.yaw
+
       val dx = newState.x - lastTick.x
       val dz = newState.z - lastTick.z
       val horizontalDist = Mth.sqrt((dx * dx + dz * dz).toFloat())
 
       // LivingEntity.calculateEntityAnimation() (which drives the third-person model's leg/limb
       // swing animation, via LivingEntityRenderer reading player.walkAnimation) measures movement
-      // as getX() - xo each tick - but onRenderFrame below sets xo equal to the current position
-      // on every single render frame, so that delta is always ~zero and the walk animation never
-      // gets real movement speed. Same root issue as footstep sounds (see maybePlayMovementSound's
-      // comment - Entity.move() is never called during playback), just for animation instead of
-      // sound. Fixed the same way: reimplement the relevant bit (LivingEntity.updateWalkAnimation)
-      // ourselves, fed by our own already-computed tick-to-tick horizontal distance.
+      // as getX() - xo each tick - xo is now the real tick-start value (see above), but that alone
+      // still isn't enough: Entity.move()'s per-tick call to this is what vanilla actually relies
+      // on, and playback never calls it (position is applied by direct teleport/lerp instead). Same
+      // root issue as footstep sounds (see maybePlayMovementSound's comment). Fixed the same way:
+      // reimplement the relevant bit (LivingEntity.updateWalkAnimation) ourselves, fed by our own
+      // already-computed tick-to-tick horizontal distance.
       player.walkAnimation.update(horizontalDist.coerceAtMost(0.25f) * 4f, 0.4f)
 
       maybePlayMovementSound(player, horizontalDist, onGround, isInWater)
@@ -454,9 +471,15 @@ object PlaybackManager {
 
   // Called every render frame (not just every tick) via GameRendererMixin, before the camera
   // reads the player's position/rotation. We interpolate between the last two recorded tick
-  // snapshots ourselves and write the result straight into both the "current" and "old" fields,
-  // so every reader (camera, arm, hitbox outlines, ...) sees an already-smoothed value instead of
-  // a value that jumps once every tick (20 times a second).
+  // snapshots ourselves and write the result into the "current" position/rotation fields, so
+  // every reader (camera, arm, hitbox outlines, ...) sees an already-smoothed value instead of a
+  // value that jumps once every tick (20 times a second). Deliberately does NOT also touch the
+  // "old" fields (xo/yo/zo/xRotO/yRotO) every frame anymore - those are now set once per tick, in
+  // applySnapshot, to the real "position at start of this tick" vanilla itself expects (see the
+  // comment there). Forcing old==current every frame used to silently disable any OTHER vanilla
+  // code that does its own Mth.lerp(partialTick, old, current) - not just our own camera lerp
+  // above it - which is exactly what broke walk animation (fixed separately) and would equally
+  // affect e.g. CapeLayer's cloak-swing offset or ItemInHandRenderer's hand-bob pitch lerp.
   fun onRenderFrame(partialTick: Float) {
     if (!active) return
 
@@ -479,13 +502,8 @@ object PlaybackManager {
     val pitch = Mth.lerp(effectivePartialTick, from.pitch, to.pitch)
 
     player.setPos(x, y, z)
-    player.xo = x
-    player.yo = y
-    player.zo = z
     player.setYRot(yaw)
     player.setXRot(pitch)
-    player.yRotO = yaw
-    player.xRotO = pitch
 
     // yHeadRot tracks the camera yaw every render frame, same as yRot above - the head is
     // *supposed* to follow view direction immediately and exactly, with no per-tick lag, the same
