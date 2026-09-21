@@ -21,6 +21,15 @@ Requires JDK 21 to run Gradle (the mod itself still targets/runs on Java 17+ at 
 ./gradlew runClient   # launch a dev Minecraft client with the mod loaded
 ```
 
+## Features
+
+- **Recording**: captures the real clientbound packet stream plus client-only bits (own position/rotation, predicted animations) to `recordings/<timestamp>.rec`.
+- **Playback**: full world reconstruction (entities, chunks, chat, sound) via a real disconnected `ClientPacketListener`, with a free camera and third-person/F5 support.
+- **Scrubbing**: jump forward/backward by 5s or 30s during normal playback, or scroll the mouse wheel to scrub continuously.
+- **Markers**: bookmark a moment while recording (by name) and jump straight to it later from the Markers screen.
+- **Blueprints & video export**: mark tick ranges as blueprints with per-region slow-motion (Blend Factor motion blur) and export them to `.mp4` via an ffmpeg pipe, with real game audio captured through an OpenAL loopback and synced to any slow-mo regions. Export runs as fast as possible rather than in real time.
+- **Recordings/Markers screens**: browse saved recordings and markers, scrollable with the mouse wheel once there are more than fit on screen.
+
 ## Keybinds
 
 All keybinds are **unbound by default** — bind them yourself under *Options → Controls → Recording* after first launch:
@@ -30,14 +39,17 @@ All keybinds are **unbound by default** — bind them yourself under *Options �
 | Toggle Recording | Start/stop recording the current session to `recordings/<timestamp>.rec` |
 | Play Last Recording | Play back the most recently modified recording |
 | Open Recordings | Browse and play back any saved recording |
+| Open Settings | Open the recording settings screen |
+| Mark Moment | Bookmark the current tick while recording, by name |
+| Skip Back/Forward 5s | Scrub 5 seconds backward/forward during playback |
+| Skip Back/Forward 30s | Scrub 30 seconds backward/forward during playback |
 | Leave Playback | Stop watching and return to the title screen |
+
+Mouse wheel also scrubs during playback (5s per notch) — no keybind needed.
 
 ## Known limitations
 
-- No video export yet (the original mod's native encoder is being replaced with an ffmpeg pipe — not implemented yet).
-- No fast-forward / skip-ahead during playback.
 - Recordings started mid-session synthesize the missing "join" state (chunks, entities, inventory, etc.) from whatever's currently loaded — very old chunks/entities far outside render distance at recording start won't be included.
-- `RecordingsScreen` has no scrolling yet — only shows as many recordings as fit on screen.
 - Dimension changes / respawns mid-recording are not specifically tested.
 
 ## Credits

@@ -14,6 +14,7 @@
     "LivingEntitySwingMixin",
     "LocalPlayerAiStepMixin",
     "MinecraftHandleKeybindsMixin",
+    "MouseHandlerMixin",
     "ParticleEngineMixin",
     "WindowMixin"
   ],
