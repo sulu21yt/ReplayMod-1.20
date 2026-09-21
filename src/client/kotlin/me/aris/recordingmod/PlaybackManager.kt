@@ -33,6 +33,7 @@ import net.minecraft.world.level.block.Block
 import net.minecraft.world.phys.Vec3
 import org.slf4j.LoggerFactory
 import java.io.File
+import kotlin.math.abs
 
 // Plays a recording back by feeding the captured packets through a real (but disconnected)
 // ClientPacketListener - the same class vanilla uses for a live server connection - so that world
@@ -64,6 +65,12 @@ object PlaybackManager {
   private var stepMoveDist = 0f
   private var stepNextThreshold = 1f
   private var wasInWater = false
+
+  // Smoothed per-tick displacement used only to derive a stable body-facing direction - see
+  // updateBodyAndHeadRotation's comment for why a single tick's raw dx/dz isn't good enough on
+  // its own.
+  private var smoothedDx = 0.0
+  private var smoothedDz = 0.0
 
   // How many ticks of this playback we've processed so far - used by startAtTick to know when
   // it's caught up to the requested marker tick.
@@ -134,6 +141,8 @@ object PlaybackManager {
     stepMoveDist = 0f
     stepNextThreshold = 1f
     wasInWater = false
+    smoothedDx = 0.0
+    smoothedDz = 0.0
     currentTick = 0
     isFastForwarding = false
     stopAtTick = null
@@ -340,7 +349,81 @@ object PlaybackManager {
       player.walkAnimation.update(horizontalDist.coerceAtMost(0.25f) * 4f, 0.4f)
 
       maybePlayMovementSound(player, horizontalDist, onGround, isInWater)
+      updateBodyAndHeadRotation(yaw, dx, dz)
+    } else {
+      updateBodyAndHeadRotation(yaw, 0.0, 0.0)
     }
+  }
+
+  // Reimplements the tick-rate part of LivingEntity.tick()/tickHeadTurn() (both of which we can't
+  // reach directly - the real ones live inside aiStep(), which LocalPlayerAiStepMixin cancels
+  // entirely during playback). Deliberately only ever writes yBodyRot/yHeadRot themselves, never
+  // yBodyRotO/yHeadRotO - vanilla's own (non-cancelled) LivingEntity.tick() already copies
+  // "old = current" for both, every tick, before this runs, which is exactly the timing needed for
+  // LivingEntityRenderer's own unconditional Mth.rotLerp(partialTick, yBodyRotO, yBodyRot) to
+  // interpolate the body/head smoothly across the whole tick - the same way it already does for
+  // position (xo/x) - with no per-frame involvement from us needed at all.
+  //
+  // The target body yaw is vanilla's real one: the direction of actual movement (atan2 of this
+  // tick's recorded dx/dz), not the view yaw - vanilla only falls back to view yaw while attacking,
+  // and otherwise leaves yBodyRot untouched while standing still (matching the well-known vanilla
+  // quirk where your body doesn't turn to face a new look direction until you actually move). Two
+  // earlier versions got this wrong in ways that both happened to look smooth in isolation but were
+  // never actually right:
+  //   1. Forcing yBodyRot=yBodyRotO=yHeadRot=yHeadRotO to the per-frame camera yaw every render
+  //      frame threw away yBodyRot's whole reason for existing as a separate, low-pass-filtered
+  //      field, feeding every small recorded-yaw fluctuation straight into the body/head model,
+  //      frame-for-frame - visible as a "nervous" flickering silhouette (worst at the head, farthest
+  //      from the model's rotation pivot at the feet, and against high-contrast backgrounds like
+  //      open sky), confirmed absent from the identical recording watched live.
+  //   2. Smoothing yBodyRot toward view yaw once per tick (still wrong) fixed the flicker for
+  //      straight-line walking - where movement direction and view direction roughly coincide - but
+  //      not for strafing, where they don't, which is exactly where this was first reported.
+  // Using the real movement-direction target fixes both: since it derives from our own already-
+  // recorded per-tick dx/dz (there being no live physics to read it from), it only depends on
+  // genuinely one-tick-apart data, so it's exactly as stable as vanilla's own version.
+  //
+  // Simplification: vanilla also flips the walk animation's sign while facing backward relative to
+  // travel. Not reimplemented here - a minor animation quirk, not a smoothness bug.
+  private fun updateBodyAndHeadRotation(yaw: Float, dx: Double, dz: Double) {
+    val player = Minecraft.getInstance().player ?: return
+
+    // A single tick's own dx/dz is noisy - real per-tick displacement (especially while
+    // accelerating, changing direction, or moving diagonally) can vary sharply tick-to-tick even
+    // when the player's overall direction of travel is fairly steady, since it's just one instant
+    // sample of the movement, not smoothed the way live physics's own momentum/friction would tend
+    // to keep it. Averaging a few ticks' worth of displacement before deriving an angle from it
+    // (same idea as smoothedDx/Z below) damps that per-tick noise out of the *target* itself,
+    // instead of relying solely on the 0.3 approach factor to hide a noisy target after the fact -
+    // confirmed via real logged data: yBodyRot swinging over 10+ degrees across a handful of ticks
+    // while the recorded view yaw never moved at all, which the approach factor alone only damps,
+    // not removes, and which is invisible at exactly 20 FPS (always sampled at the same point in
+    // each tick's interpolation window) but fully visible at higher, evenly-sweeping frame rates.
+    smoothedDx += (dx - smoothedDx) * 0.15
+    smoothedDz += (dz - smoothedDz) * 0.15
+
+    // Ramped, not a hard on/off switch: right as the smoothed speed first crosses the "moving"
+    // threshold, the direction derived from it is still mostly stale/zero (the average hasn't
+    // caught up yet), so snapping straight to a full 30% approach toward whatever that half-formed
+    // target happens to be produces its own one-tick kick right at the start of movement (seen in
+    // real logged data: 0deg -> -5deg in a single tick). Scaling the approach factor by how far
+    // above the threshold the speed is - zero right at the threshold, full strength once clearly
+    // moving - spreads that same eventual correction over several ticks instead.
+    val speed = Mth.sqrt((smoothedDx * smoothedDx + smoothedDz * smoothedDz).toFloat())
+    if (speed > 0.01f) {
+      val moveAngle = Math.toDegrees(Mth.atan2(smoothedDz, smoothedDx)).toFloat() - 90f
+      val viewDelta = abs(Mth.wrapDegrees(yaw - moveAngle))
+      val bodyYawTarget = if (viewDelta < 95f || viewDelta > 265f) moveAngle else moveAngle - 180f
+      val rampedFactor = ((speed - 0.01f) / 0.04f).coerceIn(0f, 1f) * 0.3f
+      player.yBodyRot += Mth.wrapDegrees(bodyYawTarget - player.yBodyRot) * rampedFactor
+    }
+
+    val headBodyDiff = Mth.wrapDegrees(yaw - player.yBodyRot)
+    if (abs(headBodyDiff) > 50f) {
+      player.yBodyRot += headBodyDiff - Mth.sign(headBodyDiff.toDouble()) * 50f
+    }
+    // yHeadRot itself is deliberately NOT set here - see onRenderFrame, which tracks it to the
+    // camera yaw every render frame instead of once per tick.
   }
 
   // Reimplements just enough of Entity.move()'s footstep/swim-sound-triggering logic (see the
@@ -404,22 +487,15 @@ object PlaybackManager {
     player.yRotO = yaw
     player.xRotO = pitch
 
-    // yBodyRot/yHeadRot (and their "O" counterparts) are what LivingEntityRenderer actually uses
-    // for the *third-person model's* torso/head orientation - separate fields from yRot/xRot above,
-    // normally smoothed once per real tick by LivingEntity.aiStep()'s tickHeadTurn(), completely
-    // independent of anything we do here. Since our camera-facing yaw/pitch now gets recomputed
-    // fresh every real render frame (many per tick), but yBodyRot/yHeadRot only ever changed once
-    // per tick, the third-person model visibly snapped/stuttered between ticks while the camera
-    // itself moved smoothly - invisible in first person (no body model drawn there at all), which
-    // is presumably why this went unnoticed until third person became reachable during playback.
-    // Matching them to the same already-smoothed yaw each frame (like every other field above)
-    // trades away the subtle natural lag of the body slowly catching up to a fast head turn, in
-    // exchange for eliminating the stutter entirely - judged an acceptable trade for this project.
-    // (A/B tested by temporarily disabling this - made no difference to a separately reported
-    // "choppy movement in open areas, playback only" symptom, so that has a different cause, but
-    // this is still worth keeping as its own real fix.)
-    player.yBodyRot = yaw
-    player.yBodyRotO = yaw
+    // yHeadRot tracks the camera yaw every render frame, same as yRot above - the head is
+    // *supposed* to follow view direction immediately and exactly, with no per-tick lag, the same
+    // way it does live (this is the "your head turns as fast as you can move the mouse" feel).
+    // yBodyRot is the opposite: a genuinely low-pass-filtered value, correctly updated only once
+    // per tick in updateBodyAndHeadRotation and left for LivingEntityRenderer's own unconditional
+    // Mth.rotLerp(partialTick, yBodyRotO, yBodyRot) to interpolate smoothly across the tick, same
+    // as position - forcing IT to a per-frame value was the original (already-fixed) mistake. The
+    // two fields need opposite treatment because they mean opposite things: the head is meant to
+    // be as instantaneous as the camera; the body is deliberately not.
     player.yHeadRot = yaw
     player.yHeadRotO = yaw
   }
