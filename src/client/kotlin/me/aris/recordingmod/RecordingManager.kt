@@ -26,7 +26,6 @@ import net.minecraft.network.FriendlyByteBuf
 import net.minecraft.network.protocol.BundlePacket
 import net.minecraft.network.protocol.Packet
 import net.minecraft.network.protocol.PacketFlow
-import net.minecraft.network.protocol.game.ClientboundAddEntityPacket
 import net.minecraft.network.protocol.game.ClientboundAddPlayerPacket
 import net.minecraft.network.protocol.game.ClientboundContainerSetContentPacket
 import net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket
@@ -45,6 +44,7 @@ import net.minecraft.world.entity.EquipmentSlot
 import net.minecraft.world.entity.LivingEntity
 import net.minecraft.world.entity.player.Player
 import net.minecraft.world.entity.player.PlayerModelPart
+import net.minecraft.world.entity.projectile.Projectile
 import net.minecraft.world.level.Level
 import net.minecraft.world.level.block.Block
 import net.minecraft.world.level.block.state.BlockState
@@ -272,10 +272,33 @@ object RecordingManager {
     for (entity in level.entitiesForRendering()) {
       if (entity.id == myId) continue
 
+      // A Projectile (fishing hook, arrow, trident, ...) whose owner is already gone/unresolvable
+      // client-side (getOwner() only works via a direct cached reference on the client, never a UUID
+      // lookup - see Projectile.getOwner()) is already invisible and non-functional as-is - e.g.
+      // FishingHookRenderer.render() does nothing at all without a resolved player owner. Snapshotting
+      // it anyway is actively harmful, not just wasted: FishingHook.getAddEntityPacket() falls back to
+      // encoding *its own* entity id as the owner field when getOwner() is null (unlike the generic
+      // Projectile version, which just encodes 0) - which then fails to resolve to itself on replay
+      // (it doesn't exist under that id yet) and hits FishingHook.recreateFromPacket()'s explicit
+      // "not a valid owner" error+kill path. A long fishing session leaves many such orphaned hooks
+      // sitting in entitiesForRendering() (a pre-existing vanilla/server-side cleanup quirk, unrelated
+      // to this mod), so without this skip, starting a new recording mid-session could synthesize
+      // dozens of these doomed entities at once - a burst of log errors and wasted entity creation/
+      // kill cycles right as playback starts, felt as a brief stutter in entities/sound loading in.
+      if (entity is Projectile && entity.getOwner() == null) continue
+
       if (entity is Player) {
         writePacket(ClientboundAddPlayerPacket(entity))
       } else {
-        writePacket(ClientboundAddEntityPacket(entity))
+        // entity.getAddEntityPacket() (polymorphic) instead of the generic ClientboundAddEntityPacket
+        // (entity) constructor - the latter always passes data=0, silently discarding e.g. a
+        // Projectile's owner entity id (Projectile.getAddEntityPacket() overrides this specifically
+        // to encode it). Without this, a FishingHook (or arrow/trident) that already existed when
+        // recording started - the common case for fishing, which usually spans much longer than the
+        // time it takes to start a recording - would never get Entity.setOwner() called during
+        // replay (Projectile.recreateFromPacket() looks the owner up by the id in that field), so
+        // e.g. player.fishing stays null forever and the fishing rod never shows its "cast" pose.
+        writePacket(entity.addEntityPacket)
       }
 
       val data = entity.entityData.nonDefaultValues

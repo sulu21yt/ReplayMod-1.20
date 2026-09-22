@@ -33,6 +33,8 @@ import net.minecraft.sounds.SoundEvent
 import net.minecraft.sounds.SoundSource
 import net.minecraft.tags.FluidTags
 import net.minecraft.util.Mth
+import net.minecraft.world.effect.MobEffectUtil
+import net.minecraft.world.effect.MobEffects
 import net.minecraft.world.InteractionHand
 import net.minecraft.world.entity.player.Player
 import net.minecraft.world.level.block.Block
@@ -362,6 +364,55 @@ object PlaybackManager {
       (player as EntityMovementSoundInvokerMixin).`recordingmod$doWaterSplashEffect`()
     }
     wasInWater = isInWater
+
+    // ItemInHandRenderer's first-person held-item "turn sway" - poseStack.mulPose(Axis.XP/YP.
+    // rotationDegrees((getViewXRot(f) - Mth.lerp(f, xBobO, xBob)) * 0.1F)) - depends on LocalPlayer's
+    // own xBob/yBob: a deliberately laggy (0.5-per-tick) tracker of the player's own rotation, so the
+    // *gap* between instantaneous view rotation and this lagging tracker is what produces the sway as
+    // you turn. It's updated in LocalPlayer.serverAiStep() - called from within aiStep() (LivingEntity.
+    // aiStep() calls this.serverAiStep() directly, not a separate tick path), so it's cancelled outright
+    // along with the rest of aiStep() during playback (LocalPlayerAiStepMixin) and stays frozen at 0
+    // forever. With xBob/yBob stuck at 0, the sway formula degrades from "how far have I turned
+    // recently" into "what is my absolute view angle, scaled by 0.1" - not a lag effect at all, just a
+    // wrong, roughly-constant-feeling offset that doesn't actually track turning - matching the "hands
+    // don't follow the rotation" report (present in both first- and third-person recordings, since it's
+    // purely a local-player rendering field, unrelated to which perspective was active while recording).
+    // Reimplemented directly: same formula, fed by our own recorded per-tick pitch/yaw.
+    player.xBobO = player.xBob
+    player.yBobO = player.yBob
+    player.xBob += (pitch - player.xBob) * 0.5f
+    player.yBob += (yaw - player.yBob) * 0.5f
+
+    // LivingEntity.attackAnim (0..1 swing progress curve, driving the arm-swing pose AND, via
+    // ItemInHandRenderer's `g = localPlayer.getAttackAnim(f)`, the fishing rod's cast motion and
+    // every other item's swing-based animation) only ever advances inside updateSwingTime(), called
+    // from Player.serverAiStep() - itself only ever called from within LivingEntity.aiStep()
+    // (`this.serverAiStep();`), so it's cancelled along with the rest of aiStep() during playback and
+    // never runs at all. applySwing() (below) already sets swinging=true/swingTime=-1 to *trigger* a
+    // swing, matching real client prediction, but with nothing ever calling updateSwingTime()
+    // afterward, swingTime/attackAnim then just sit frozen forever - the item looks completely rigid,
+    // never showing any swing/cast motion at all (found via ReplayMod's own RemotePlayer.aiStep(),
+    // vanilla's reference implementation for animating another player from lerped tick data - it
+    // calls this.updateSwingTime() every tick for exactly this reason). Reimplemented directly (same
+    // formula as LivingEntity.updateSwingTime(), which is private) since every field it touches is
+    // public.
+    val swingDuration = if (MobEffectUtil.hasDigSpeed(player)) {
+      6 - (1 + MobEffectUtil.getDigSpeedAmplification(player))
+    } else if (player.hasEffect(MobEffects.DIG_SLOWDOWN)) {
+      6 + (1 + player.getEffect(MobEffects.DIG_SLOWDOWN)!!.amplifier) * 2
+    } else {
+      6
+    }
+    if (player.swinging) {
+      player.swingTime++
+      if (player.swingTime >= swingDuration) {
+        player.swingTime = 0
+        player.swinging = false
+      }
+    } else {
+      player.swingTime = 0
+    }
+    player.attackAnim = player.swingTime.toFloat() / swingDuration
 
     if (lastTick != null) {
       // Vanilla's real per-tick contract for xo/yo/zo/xRotO/yRotO is "value at the START of this
