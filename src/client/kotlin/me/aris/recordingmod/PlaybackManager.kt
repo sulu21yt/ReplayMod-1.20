@@ -5,11 +5,17 @@ import me.aris.recordingmod.RecordingFormat.BLOCK_BREAK_PROGRESS
 import me.aris.recordingmod.RecordingFormat.BLOCK_CHANGE
 import me.aris.recordingmod.RecordingFormat.LOCAL_LEVEL_EVENT
 import me.aris.recordingmod.RecordingFormat.LOCAL_PLAY_SOUND
+import me.aris.recordingmod.RecordingFormat.LOCAL_SKIN_CUSTOMIZATION
+import me.aris.recordingmod.RecordingFormat.LOCAL_SNEAK_STATE
+import me.aris.recordingmod.RecordingFormat.LOCAL_START_USING_ITEM
+import me.aris.recordingmod.RecordingFormat.LOCAL_STOP_USING_ITEM
 import me.aris.recordingmod.RecordingFormat.MINING_PARTICLE
 import me.aris.recordingmod.RecordingFormat.PLAYER_SNAPSHOT
 import me.aris.recordingmod.RecordingFormat.SWING
 import me.aris.recordingmod.RecordingFormat.TICK_END
 import me.aris.recordingmod.mixins.EntityMovementSoundInvokerMixin
+import me.aris.recordingmod.mixins.LocalPlayerCrouchingAccessorMixin
+import me.aris.recordingmod.mixins.PlayerModelCustomisationAccessorMixin
 import net.minecraft.client.Minecraft
 import net.minecraft.client.gui.screens.TitleScreen
 import net.minecraft.core.BlockPos
@@ -280,6 +286,10 @@ object PlaybackManager {
           MINING_PARTICLE -> applyMiningParticle(buf)
           LOCAL_LEVEL_EVENT -> applyLocalLevelEvent(buf)
           LOCAL_PLAY_SOUND -> applyLocalPlaySound(buf)
+          LOCAL_START_USING_ITEM -> applyStartUsingItem(buf)
+          LOCAL_STOP_USING_ITEM -> applyStopUsingItem()
+          LOCAL_SNEAK_STATE -> applySneakState(buf)
+          LOCAL_SKIN_CUSTOMIZATION -> applySkinCustomization(buf)
           else -> {
             if (id < 0) {
               LOGGER.warn("Unknown record type {} in recording, stopping playback", id)
@@ -384,6 +394,25 @@ object PlaybackManager {
       // reimplement the relevant bit (LivingEntity.updateWalkAnimation) ourselves, fed by our own
       // already-computed tick-to-tick horizontal distance.
       player.walkAnimation.update(horizontalDist.coerceAtMost(0.25f) * 4f, 0.4f)
+
+      // View bobbing (GameRenderer.bobView) reads walkDist/walkDistO and bob/oBob directly - none
+      // of which walkAnimation.update above touches (that's a separate, newer field pair added later
+      // just for the third-person leg-swing model). Both are normally maintained by Player.aiStep()
+      // (bob/oBob smoothing) and Entity.move() (walkDist accumulation, same *0.6F distance formula
+      // as our own footstep accumulator below) - aiStep() is fully cancelled during playback
+      // (LocalPlayerAiStepMixin) and move() is never called at all (position is direct teleport/lerp),
+      // so without this, bob/oBob/walkDist stay frozen at their initial values forever and the
+      // camera never bobs, even with the setting on. Reimplemented the same way as walkAnimation:
+      // fed by our own already-known per-tick values instead of vanilla's own physics pass.
+      player.walkDistO = player.walkDist
+      player.walkDist += horizontalDist * 0.6f
+      player.oBob = player.bob
+      val bobTarget = if (onGround && !player.isDeadOrDying && !player.isSwimming) {
+        player.deltaMovement.horizontalDistance().toFloat().coerceAtMost(0.1f)
+      } else {
+        0f
+      }
+      player.bob += (bobTarget - player.bob) * 0.4f
 
       maybePlayMovementSound(player, horizontalDist, onGround, isInWater)
       updateBodyAndHeadRotation(yaw, dx, dz)
@@ -524,6 +553,22 @@ object PlaybackManager {
     player.setPos(x, y, z)
     player.setYRot(yaw)
     player.setXRot(pitch)
+    // Pitch has no head-only equivalent of yHeadRot (see below) - Camera.setup, ItemInHandRenderer's
+    // first-person hand/weapon-sway transform, and LivingEntityRenderer's third-person head tilt all
+    // read the base xRot/xRotO pair directly via Entity.getViewXRot(partialTick), which does its OWN
+    // Mth.lerp(partialTick, xRotO, xRot) - a second interpolation on top of the value we already
+    // computed above. Since xRotO is (correctly, per applySnapshot's comment) only updated once per
+    // tick while `pitch` here changes every render frame, that second lerp doesn't reproduce our
+    // linear interpolation - it composes into partialTick² (verified algebraically: substituting our
+    // own lerp result back into Mth.lerp(f, xRotO, ourLerp(f, xRotO, target)) collapses to
+    // xRotO + f²*(target - xRotO)), i.e. pitch visibly lags behind the true position during a fast
+    // turn before snapping to catch up right at the tick boundary - most noticeable in exactly the
+    // first-person held-item transform the user reported ("hands" drifting from where they should be
+    // while turning). Fixed the same way yHeadRot already is below: collapse xRotO to the same
+    // already-correct value every frame, so any consumer's own additional lerp is a no-op instead of
+    // a second interpolation. Yaw doesn't need this - LivingEntity.getViewYRot always reads
+    // yHeadRot/yHeadRotO instead of the base yRot/yRotO pair, and those are already collapsed below.
+    player.xRotO = pitch
 
     // yHeadRot tracks the camera yaw every render frame, same as yRot above - the head is
     // *supposed* to follow view direction immediately and exactly, with no per-tick lag, the same
@@ -549,6 +594,59 @@ object PlaybackManager {
     val handOrdinal = buf.readVarInt()
     val hand = InteractionHand.values().getOrNull(handOrdinal) ?: InteractionHand.MAIN_HAND
     Minecraft.getInstance().player?.swing(hand)
+  }
+
+  // Restores the local player's own using-item state (see RecordingFormat.LOCAL_START_USING_ITEM)
+  // by driving Minecraft's real item-use system directly, rather than reimplementing the bow/food/
+  // shield draw animation ourselves - startUsingItem() sets LocalPlayer's own isUsingItem()/
+  // getUseItem()/getUseItemRemainingTicks(), which LivingEntity.tick()'s updatingUsingItem() (not
+  // cancelled by LocalPlayerAiStepMixin - it lives in tick(), not aiStep()) then progresses every
+  // tick exactly as it would live, driving the real draw/charge animation on its own.
+  private fun applyStartUsingItem(buf: FriendlyByteBuf) {
+    val handOrdinal = buf.readVarInt()
+    val hand = InteractionHand.values().getOrNull(handOrdinal) ?: InteractionHand.MAIN_HAND
+    Minecraft.getInstance().player?.startUsingItem(hand)
+  }
+
+  private fun applyStopUsingItem() {
+    Minecraft.getInstance().player?.stopUsingItem()
+  }
+
+  // Restores the local player's sneak state (see RecordingFormat.LOCAL_SNEAK_STATE). Turns out
+  // LocalPlayer overrides BOTH isShiftKeyDown() and isCrouching() to read purely local, input-driven
+  // fields instead of the base Entity/Pose machinery - the exact same "client-prediction override"
+  // pattern as isUsingItem() (point 32), just two fields deep instead of one, found by tracing why a
+  // debug log showed isShiftKeyDown() reading false immediately after Entity.setShiftKeyDown(true):
+  //   - LocalPlayer.isShiftKeyDown() -> `this.input != null && this.input.shiftKeyDown` (ignores the
+  //     base entity-data flag entirely) - this is what Player.updatePlayerPose() actually calls via
+  //     virtual dispatch, so the base setShiftKeyDown() call below never influenced pose at all; the
+  //     CROUCHING pose the earlier debug log caught was vanilla's own "can't fit standing" auto-crouch
+  //     fallback (canEnterPose(STANDING) failing), unrelated to the recorded sneak key.
+  //   - LocalPlayer.isCrouching() -> `this.crouching`, a separate private field normally only
+  //     recomputed inside aiStep() (cancelled during playback, LocalPlayerAiStepMixin) - this is what
+  //     PlayerRenderer.setModelProperties reads for the actual bent-over model animation
+  //     (playerModel.crouching) and getRenderOffset()'s -0.125 sneak offset, independent of Pose.
+  // Setting both directly (input.shiftKeyDown is a public field; crouching needs the accessor mixin,
+  // it's private) makes both the pose (camera/hitbox) and the model animation correct, without
+  // needing aiStep()'s full derivation - we already know the real answer from the recording.
+  // The base setShiftKeyDown() call is kept too, purely for correctness elsewhere (e.g. any other
+  // code that reads the synced flag directly rather than through LocalPlayer's overrides).
+  private fun applySneakState(buf: FriendlyByteBuf) {
+    val sneaking = buf.readBoolean()
+    val player = Minecraft.getInstance().player ?: return
+    player.setShiftKeyDown(sneaking)
+    player.input?.shiftKeyDown = sneaking
+    (player as LocalPlayerCrouchingAccessorMixin).`recordingmod$setCrouching`(sneaking)
+  }
+
+  // Restores which skin overlay layers (jacket/sleeves/pants legs/hat) render (see RecordingFormat.
+  // LOCAL_SKIN_CUSTOMIZATION) - there's no public Player API for this, so it's set directly on the
+  // synced entity-data byte via the accessor mixin (mirrors exactly how ServerPlayer itself sets it
+  // when handling a real client's ServerboundClientInformationPacket).
+  private fun applySkinCustomization(buf: FriendlyByteBuf) {
+    val mask = buf.readByte()
+    val player = Minecraft.getInstance().player ?: return
+    player.entityData.set(PlayerModelCustomisationAccessorMixin.`recordingmod$dataPlayerModeCustomisation`(), mask)
   }
 
   private fun applyBlockBreakProgress(buf: FriendlyByteBuf) {

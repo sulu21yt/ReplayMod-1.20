@@ -5,6 +5,10 @@ import me.aris.recordingmod.RecordingFormat.BLOCK_BREAK_PROGRESS
 import me.aris.recordingmod.RecordingFormat.BLOCK_CHANGE
 import me.aris.recordingmod.RecordingFormat.LOCAL_LEVEL_EVENT
 import me.aris.recordingmod.RecordingFormat.LOCAL_PLAY_SOUND
+import me.aris.recordingmod.RecordingFormat.LOCAL_SKIN_CUSTOMIZATION
+import me.aris.recordingmod.RecordingFormat.LOCAL_SNEAK_STATE
+import me.aris.recordingmod.RecordingFormat.LOCAL_START_USING_ITEM
+import me.aris.recordingmod.RecordingFormat.LOCAL_STOP_USING_ITEM
 import me.aris.recordingmod.RecordingFormat.MINING_PARTICLE
 import me.aris.recordingmod.RecordingFormat.PLAYER_SNAPSHOT
 import me.aris.recordingmod.RecordingFormat.SWING
@@ -40,6 +44,7 @@ import net.minecraft.world.InteractionHand
 import net.minecraft.world.entity.EquipmentSlot
 import net.minecraft.world.entity.LivingEntity
 import net.minecraft.world.entity.player.Player
+import net.minecraft.world.entity.player.PlayerModelPart
 import net.minecraft.world.level.Level
 import net.minecraft.world.level.block.Block
 import net.minecraft.world.level.block.state.BlockState
@@ -406,6 +411,36 @@ object RecordingManager {
     }
   }
 
+  // Called from LocalPlayerUseItemMixin whenever the local player starts actively using an item
+  // (bow/crossbow draw, eating, drinking, blocking, trident) - see RecordingFormat.LOCAL_START_USING_ITEM
+  // for why this needs its own capture (client prediction, never echoed back as a packet).
+  fun onLocalStartUsingItem(hand: InteractionHand) {
+    if (!active) return
+
+    val buf = newBuffer()
+    buf.writeVarInt(LOCAL_START_USING_ITEM)
+    buf.writeVarInt(hand.ordinal)
+
+    synchronized(lock) {
+      val stream = out ?: return
+      stream.write(buf.toByteArray())
+    }
+  }
+
+  // Called from LocalPlayerUseItemMixin whenever the local player stops actively using an item
+  // (released, or interrupted) - see RecordingFormat.LOCAL_STOP_USING_ITEM.
+  fun onLocalStopUsingItem() {
+    if (!active) return
+
+    val buf = newBuffer()
+    buf.writeVarInt(LOCAL_STOP_USING_ITEM)
+
+    synchronized(lock) {
+      val stream = out ?: return
+      stream.write(buf.toByteArray())
+    }
+  }
+
   // Called from ClientLevelMixin whenever the block-breaking "crack" overlay is started,
   // advanced or stopped. Only our own breaking matters - other players' progress already
   // arrives via ClientboundBlockDestructionPacket.
@@ -515,12 +550,26 @@ object RecordingManager {
     snapshot.writeBoolean(player.onGround())
     snapshot.writeVarInt(player.inventory.selected)
 
+    val sneakState = newBuffer()
+    sneakState.writeVarInt(LOCAL_SNEAK_STATE)
+    sneakState.writeBoolean(Minecraft.getInstance().options.keyShift.isDown)
+
+    val skinCustomization = newBuffer()
+    skinCustomization.writeVarInt(LOCAL_SKIN_CUSTOMIZATION)
+    var mask = 0
+    for (part in PlayerModelPart.values()) {
+      if (Minecraft.getInstance().options.isModelPartEnabled(part)) mask = mask or part.mask
+    }
+    skinCustomization.writeByte(mask)
+
     val tickEnd = newBuffer()
     tickEnd.writeVarInt(TICK_END)
 
     synchronized(lock) {
       val stream = out ?: return
       stream.write(snapshot.toByteArray())
+      stream.write(sneakState.toByteArray())
+      stream.write(skinCustomization.toByteArray())
       stream.write(tickEnd.toByteArray())
     }
     currentTick++

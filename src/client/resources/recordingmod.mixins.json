@@ -6,6 +6,7 @@
   "client": [
     "ClientLevelMixin",
     "ConnectionMixin",
+    "DebugRenderItemInHandMixin",
     "EntityMovementSoundInvokerMixin",
     "GameRendererMixin",
     "LevelMixin",
@@ -13,9 +14,12 @@
     "LibraryMixin",
     "LivingEntitySwingMixin",
     "LocalPlayerAiStepMixin",
+    "LocalPlayerCrouchingAccessorMixin",
+    "LocalPlayerUseItemMixin",
     "MinecraftHandleKeybindsMixin",
     "MouseHandlerMixin",
     "ParticleEngineMixin",
+    "PlayerModelCustomisationAccessorMixin",
     "WindowMixin"
   ],
   "injectors": {
