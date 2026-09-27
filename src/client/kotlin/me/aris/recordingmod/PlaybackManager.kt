@@ -601,7 +601,23 @@ object PlaybackManager {
     val yaw = Mth.rotLerp(effectivePartialTick, from.yaw, to.yaw)
     val pitch = Mth.lerp(effectivePartialTick, from.pitch, to.pitch)
 
-    player.setPos(x, y, z)
+    // Camera.setup (and Entity.getPosition/getEyePosition) do their OWN Mth.lerp(partialTick, xo,
+    // getX()) on top of whatever we write here. With xo left at the tick-start value (see
+    // applySnapshot) and getX() already lerped, that composed into prev + f²*(cur - prev) - the
+    // camera eased in from a standstill every tick and overshot to 2x speed by its end, a 20Hz
+    // pulse visible whenever moving. Same double-interpolation problem as xRotO below, but xo can't
+    // just be collapsed to the current value (that broke cape/hand-bob lerps, see applySnapshot).
+    // Instead shift the pair so it keeps its real per-tick span (cur - prev) but vanilla's own lerp,
+    // at the partialTick it actually uses, lands exactly on our position - which also stays correct
+    // during export, where effectivePartialTick differs from the real partialTick.
+    val realF = partialTick.toDouble()
+    val oldX = x - realF * (to.x - from.x)
+    val oldY = y - realF * (to.y - from.y)
+    val oldZ = z - realF * (to.z - from.z)
+    player.setPos(oldX + (to.x - from.x), oldY + (to.y - from.y), oldZ + (to.z - from.z))
+    player.xo = oldX
+    player.yo = oldY
+    player.zo = oldZ
     player.setYRot(yaw)
     player.setXRot(pitch)
     // Pitch has no head-only equivalent of yHeadRot (see below) - Camera.setup, ItemInHandRenderer's
