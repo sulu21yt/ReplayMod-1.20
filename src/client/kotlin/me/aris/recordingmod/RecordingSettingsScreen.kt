@@ -2,18 +2,14 @@ package me.aris.recordingmod
 
 import net.minecraft.ChatFormatting
 import net.minecraft.client.gui.GuiGraphics
-import net.minecraft.client.gui.components.Button
 import net.minecraft.client.gui.components.EditBox
 import net.minecraft.client.gui.components.Tooltip
 import net.minecraft.client.gui.screens.Screen
 import net.minecraft.network.chat.Component
 
-// The recreated main menu from the legacy 1.12.2 mod's LiteLoader config panel. "Render
-// Blueprints"/"Render Blueprint Proxies" render a blueprint's tick range to video (see
-// BlueprintRenderer/VideoExporter); "Generate Markers" scans recordings for Hypixel SkyBlock
-// Dungeons events (see MarkerGenerator); "Generate Blueprints From Markers" turns saved markers
-// into blueprints (see BlueprintManager).
-class RecordingSettingsScreen(private val parent: Screen?) : Screen(Component.literal("Recording Mod")) {
+// Settings tab of the mod menu (see RecordingModMenu) - paths and render sizes. Saved whenever
+// the tab is left, whether via Done/Esc or by switching to another tab.
+class RecordingSettingsScreen(parent: Screen?) : RecordingModTabScreen(MenuTab.SETTINGS, parent) {
   // Section headers and field labels drawn in render() - EditBox itself has no visible label,
   // only an accessibility-narration title, so we draw both ourselves. isHeader picks the style.
   private data class DrawnLabel(val text: String, val x: Int, val y: Int, val isHeader: Boolean)
@@ -26,7 +22,6 @@ class RecordingSettingsScreen(private val parent: Screen?) : Screen(Component.li
   private lateinit var renderingWidthField: EditBox
   private lateinit var renderingHeightField: EditBox
   private lateinit var renderingFpsField: EditBox
-  private lateinit var blendFactorField: EditBox
   private lateinit var proxyRenderingWidthField: EditBox
   private lateinit var proxyRenderingHeightField: EditBox
 
@@ -35,7 +30,7 @@ class RecordingSettingsScreen(private val parent: Screen?) : Screen(Component.li
 
     val fieldLabelTexts = listOf(
       "Recording Path", "Final Render Path", "Ffmpeg Path", "Rendering Width", "Rendering Height",
-      "Rendering Fps", "Blend Factor", "Proxy Rendering Width", "Proxy Rendering Height"
+      "Rendering Fps", "Proxy Rendering Width", "Proxy Rendering Height"
     )
     val labelColumnWidth = fieldLabelTexts.maxOf { this.font.width(it) }
     val fieldWidth = 170
@@ -43,122 +38,54 @@ class RecordingSettingsScreen(private val parent: Screen?) : Screen(Component.li
     val labelX = this.width / 2 - totalRowWidth / 2
     fieldColumnX = labelX + labelColumnWidth + 8
 
-    var y = 30
-    val buttonWidth = 140
-    val buttonSpacing = 10
-    val buttonsX = this.width / 2 - buttonWidth - buttonSpacing / 2
-
-    addSectionHeader(buttonsX, y, "Playback")
-    y += 12
-    addRenderableWidget(
-      Button.builder(Component.literal("Recordings")) { this.minecraft?.setScreen(RecordingsScreen(this)) }
-        .bounds(buttonsX, y, buttonWidth, 20).build()
-    )
-    addRenderableWidget(
-      Button.builder(Component.literal("Markers")) { this.minecraft?.setScreen(MarkersScreen(this)) }
-        .bounds(buttonsX + buttonWidth + buttonSpacing, y, buttonWidth, 20).build()
-    )
-
-    y += 30
-    addSectionHeader(buttonsX, y, "Video Export")
-    y += 12
-    addRenderableWidget(
-      Button.builder(Component.literal("Render Blueprints")) {
-        BlueprintRenderer.renderAll(proxy = false)
-        this.minecraft?.setScreen(null)
-      }
-        .tooltip(Tooltip.create(Component.literal(
-          "Renders every blueprint that already has a proxy but no final render yet, to Final Render Path"
-        )))
-        .bounds(buttonsX, y, buttonWidth, 20).build()
-    )
-    addRenderableWidget(
-      Button.builder(Component.literal("Render Blueprint Proxies")) {
-        BlueprintRenderer.renderAll(proxy = true)
-        this.minecraft?.setScreen(null)
-      }
-        .tooltip(Tooltip.create(Component.literal("Renders a cheap preview of every blueprint that doesn't have one yet, to proxies/")))
-        .bounds(buttonsX + buttonWidth + buttonSpacing, y, buttonWidth, 20).build()
-    )
-    y += 24
-    addRenderableWidget(
-      Button.builder(Component.literal("Generate Markers")) {
-        val created = MarkerGenerator.generateForAllRecordings()
-        this.minecraft?.player?.displayClientMessage(
-          Component.literal("Generated $created marker(s) from recordings"), false
-        )
-      }
-        .tooltip(Tooltip.create(Component.literal(
-          "Scans every recording for Hypixel SkyBlock Dungeons events (deaths, drops, run start/complete/fail) and marks them"
-        )))
-        .bounds(buttonsX, y, buttonWidth, 20).build()
-    )
-    addRenderableWidget(
-      Button.builder(Component.literal("Generate Blueprints From Markers")) {
-        val created = BlueprintManager.generateFromMarkers()
-        this.minecraft?.player?.displayClientMessage(
-          Component.literal("Generated $created blueprint(s) from markers"), false
-        )
-      }
-        .tooltip(Tooltip.create(Component.literal("Creates a blueprint (20s before to 5s after) around every saved marker")))
-        .bounds(buttonsX + buttonWidth + buttonSpacing, y, buttonWidth, 20).build()
-    )
-
-    y += 32
+    addTabBar()
+    var y = CONTENT_TOP
     addSectionHeader(labelX, y, "Paths")
     y += 14
     recordingPathField = addField(
       labelX, y, "Recording Path", fieldWidth, RecordingConfig.recordingPath,
       "Folder where new recordings (.rec files) are saved"
     )
-    y += 24
+    y += 22
     finalRenderPathField = addField(
       labelX, y, "Final Render Path", fieldWidth, RecordingConfig.finalRenderPath,
       "Folder where finished rendered videos will be saved"
     )
-    y += 24
+    y += 22
     ffmpegPathField = addField(
       labelX, y, "Ffmpeg Path", fieldWidth, RecordingConfig.ffmpegPath,
-      "Path to the ffmpeg executable (\"ffmpeg\" if it's on your PATH) - used by the Export button on the Recordings screen"
+      "Path to the ffmpeg executable (\"ffmpeg\" if it's on your PATH) - used for every video render"
     )
 
-    y += 30
+    y += 24
     addSectionHeader(labelX, y, "Rendering")
     y += 14
     renderingWidthField = addField(
       labelX, y, "Rendering Width", fieldWidth, RecordingConfig.renderingWidth.toString(),
       "Output video width in pixels - the game window is resized to this for the duration of an Export/final render"
     )
-    y += 24
+    y += 22
     renderingHeightField = addField(
       labelX, y, "Rendering Height", fieldWidth, RecordingConfig.renderingHeight.toString(),
       "Output video height in pixels - the game window is resized to this for the duration of an Export/final render"
     )
-    y += 24
+    y += 22
     renderingFpsField = addField(
       labelX, y, "Rendering Fps", fieldWidth, RecordingConfig.renderingFps.toString(),
-      "Output video frame rate used by the Export button on the Recordings screen"
+      "Output video frame rate used for every video render"
     )
-    y += 24
-    blendFactorField = addField(
-      labelX, y, "Blend Factor", fieldWidth, RecordingConfig.blendFactor.toString(),
-      "Max real frames averaged into each output frame for motion blur (rendering is uncapped during export to get distinct ones)"
-    )
-    y += 24
+    y += 22
     proxyRenderingWidthField = addField(
       labelX, y, "Proxy Rendering Width", fieldWidth, RecordingConfig.proxyRenderingWidth.toString(),
       "Output width in pixels for quick low-effort proxy renders - the window is resized to this instead while proxy-rendering"
     )
-    y += 24
+    y += 22
     proxyRenderingHeightField = addField(
       labelX, y, "Proxy Rendering Height", fieldWidth, RecordingConfig.proxyRenderingHeight.toString(),
       "Output height in pixels for quick low-effort proxy renders - the window is resized to this instead while proxy-rendering"
     )
 
-    addRenderableWidget(
-      Button.builder(Component.literal("Done")) { onClose() }
-        .bounds(this.width / 2 - 75, this.height - 28, 150, 20).build()
-    )
+    addDoneButton()
   }
 
   private fun addSectionHeader(x: Int, y: Int, text: String) {
@@ -177,28 +104,21 @@ class RecordingSettingsScreen(private val parent: Screen?) : Screen(Component.li
     return field
   }
 
-  override fun onClose() {
+  override fun save() {
     RecordingConfig.recordingPath = recordingPathField.value
     RecordingConfig.finalRenderPath = finalRenderPathField.value
     RecordingConfig.ffmpegPath = ffmpegPathField.value
     RecordingConfig.renderingWidth = renderingWidthField.value.toIntOrNull() ?: RecordingConfig.renderingWidth
     RecordingConfig.renderingHeight = renderingHeightField.value.toIntOrNull() ?: RecordingConfig.renderingHeight
     RecordingConfig.renderingFps = renderingFpsField.value.toIntOrNull() ?: RecordingConfig.renderingFps
-    RecordingConfig.blendFactor = blendFactorField.value.toIntOrNull() ?: RecordingConfig.blendFactor
     RecordingConfig.proxyRenderingWidth =
       proxyRenderingWidthField.value.toIntOrNull() ?: RecordingConfig.proxyRenderingWidth
     RecordingConfig.proxyRenderingHeight =
       proxyRenderingHeightField.value.toIntOrNull() ?: RecordingConfig.proxyRenderingHeight
     RecordingConfig.save()
-
-    this.minecraft?.setScreen(parent)
   }
 
-  override fun render(guiGraphics: GuiGraphics, mouseX: Int, mouseY: Int, partialTick: Float) {
-    this.renderBackground(guiGraphics)
-    super.render(guiGraphics, mouseX, mouseY, partialTick)
-    guiGraphics.drawCenteredString(this.font, this.title, this.width / 2, 10, 0xFFFFFF)
-
+  override fun renderContent(guiGraphics: GuiGraphics, mouseX: Int, mouseY: Int, partialTick: Float) {
     for (label in labels) {
       if (label.isHeader) {
         guiGraphics.drawString(

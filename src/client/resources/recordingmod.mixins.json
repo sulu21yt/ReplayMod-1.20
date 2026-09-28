@@ -9,6 +9,7 @@
     "DebugRenderItemInHandMixin",
     "EntityMovementSoundInvokerMixin",
     "GameRendererMixin",
+    "KeyboardHandlerMixin",
     "LevelMixin",
     "LevelPlaySoundMixin",
     "LibraryMixin",
@@ -17,9 +18,12 @@
     "LocalPlayerCrouchingAccessorMixin",
     "LocalPlayerUseItemMixin",
     "MinecraftHandleKeybindsMixin",
+    "MinecraftRunTickMixin",
+    "MinecraftSetScreenMixin",
     "MouseHandlerMixin",
     "ParticleEngineMixin",
     "PlayerModelCustomisationAccessorMixin",
+    "TimerAccessorMixin",
     "WindowMixin"
   ],
   "injectors": {

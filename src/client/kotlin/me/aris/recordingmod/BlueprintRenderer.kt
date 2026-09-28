@@ -26,11 +26,6 @@ object BlueprintRenderer {
 
   fun renderAll(proxy: Boolean) {
     val mc = Minecraft.getInstance()
-    if (running) {
-      mc.player?.displayClientMessage(Component.literal("Already rendering blueprints"), false)
-      return
-    }
-
     val blueprints = BlueprintManager.list().filter { blueprint ->
       if (proxy) {
         !BlueprintManager.hasProxy(blueprint)
@@ -47,6 +42,17 @@ object BlueprintRenderer {
         ),
         false
       )
+      return
+    }
+    render(blueprints, proxy)
+  }
+
+  // Renders exactly these blueprints, whatever their proxy/final status - used by renderAll and
+  // for single blueprints (the Blueprints tab's per-row buttons, and R during playback).
+  fun render(blueprints: List<BlueprintManager.Blueprint>, proxy: Boolean) {
+    val mc = Minecraft.getInstance()
+    if (running) {
+      mc.player?.displayClientMessage(Component.literal("Already rendering blueprints"), false)
       return
     }
 

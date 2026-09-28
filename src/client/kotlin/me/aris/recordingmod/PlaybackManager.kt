@@ -59,7 +59,8 @@ object PlaybackManager {
 
   // Remembered purely so seekTo can restart playback from tick 0 for a backward seek - there's no
   // keyframe format to jump within, so "rewind" really means "replay from the start again, fast".
-  private var currentFile: File? = null
+  var currentFile: File? = null
+    private set
 
   private data class LookState(val x: Double, val y: Double, val z: Double, val yaw: Float, val pitch: Float)
 
@@ -115,7 +116,22 @@ object PlaybackManager {
   // guard lives here, at the single actual entry point, rather than being each caller's problem.
   private var tickInProgress = false
 
+  // The recorded packet currently being handled, if any - lets MinecraftSetScreenMixin tell a
+  // screen change caused by the replay apart from one the viewer made themselves.
+  var packetInFlight: Packet<*>? = null
+    private set
+
+  // This frame's fraction of the way between the last two recorded ticks (see onRenderFrame) - also
+  // correct during an export, unlike the real partialTick.
+  var renderPartialTick = 0f
+    private set
+
   fun start(file: File) {
+    // A backward seek restarts the same file (see seekTo) - pause state and I/O points should
+    // survive that, only a different recording (or a fresh start after stop()) resets them.
+    if (!active || file != currentFile) PlaybackControls.reset()
+    // Watching a replay leaves the live world, so whatever was being recorded there is over.
+    if (RecordingManager.active) RecordingManager.stop()
     resetState()
 
     val mc = Minecraft.getInstance()
@@ -150,6 +166,7 @@ object PlaybackManager {
   // start of a new playback, where we do NOT want to quit to the title screen.
   private fun resetState() {
     active = false
+    ReplayScreenOverlay.reset()
     buf = null
     listener = null
     currentFile = null
@@ -230,6 +247,7 @@ object PlaybackManager {
   // the recording ran out.
   fun stop() {
     if (!active && buf == null) return
+    PlaybackControls.reset()
     resetState()
 
     val mc = Minecraft.getInstance()
@@ -292,6 +310,7 @@ object PlaybackManager {
           LOCAL_STOP_USING_ITEM -> applyStopUsingItem()
           LOCAL_SNEAK_STATE -> applySneakState(buf)
           LOCAL_SKIN_CUSTOMIZATION -> applySkinCustomization(buf)
+          RecordingFormat.LOCAL_SCREEN_STATE -> ReplayScreenOverlay.applyState(buf)
           else -> {
             if (id < 0) {
               LOGGER.warn("Unknown record type {} in recording, stopping playback", id)
@@ -321,10 +340,13 @@ object PlaybackManager {
               // skip - see isFastForwarding
             } else {
               try {
+                packetInFlight = packet
                 @Suppress("UNCHECKED_CAST")
                 (packet as Packet<PacketListener>).handle(handle.listener)
               } catch (e: Exception) {
                 LOGGER.warn("Failed to replay packet {}", packet.javaClass.simpleName, e)
+              } finally {
+                packetInFlight = null
               }
             }
           }
@@ -590,6 +612,7 @@ object PlaybackManager {
     // correct in-between fraction itself, so read it *before* previous/current rather than using
     // the real partialTick.
     val effectivePartialTick = if (VideoExporter.active) VideoExporter.nextRenderFrameFraction() else partialTick
+    renderPartialTick = effectivePartialTick
 
     val from = previous ?: return
     val to = current ?: return

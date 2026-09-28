@@ -78,6 +78,17 @@ object RecordingFormat {
   // skin renders but every overlay layer (jacket/sleeves/pants/hat) is invisible during playback,
   // since Player's entity data defaults this byte to 0 (nothing shown) until told otherwise.
   const val LOCAL_SKIN_CUSTOMIZATION = -12
+  // Which inventory-style screen the local player had open this tick, written every tick: a kind
+  // byte (SCREEN_NONE/SCREEN_INVENTORY/SCREEN_CONTAINER) and, unless none, the mouse position
+  // (as a 0..1 fraction of the window, so it maps onto any GUI size) and the item held on the
+  // cursor. The player's own inventory screen (E) never touches the network at all, and a
+  // container's cursor item is client-predicted - neither is otherwise in the recording. The
+  // container itself (chest etc.) is recorded normally via ClientboundOpenScreenPacket. See
+  // ReplayScreenOverlay for playback.
+  const val LOCAL_SCREEN_STATE = -13
+  const val SCREEN_NONE = 0
+  const val SCREEN_INVENTORY = 1
+  const val SCREEN_CONTAINER = 2
 
   fun newBuffer(): FriendlyByteBuf = FriendlyByteBuf(Unpooled.buffer())
 

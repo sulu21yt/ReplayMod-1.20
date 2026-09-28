@@ -6,7 +6,7 @@ import net.minecraft.network.chat.Component
 
 private const val TICKS_PER_SECOND = 20
 
-// Transient overlay opened by the "open timeline" keybind while watching a replay - lets you
+// Transient overlay opened with T while watching a replay (see PlaybackControls) - lets you
 // click or drag a visual bar to scrub, instead of scroll notches or fixed skip keybinds. Doesn't
 // darken/pause the game (isPauseScreen() = false, no renderBackground) since it's meant to sit on
 // top of the replay while it keeps playing, same as RenameRecordingScreen/RenameMarkerScreen do.
@@ -37,7 +37,7 @@ class PlaybackTimelineScreen : Screen(Component.literal("Timeline")) {
   private fun seekToFraction(mouseX: Double) {
     val total = PlaybackManager.totalTicks ?: return
     if (!PlaybackManager.active) return
-    PlaybackManager.seekTo((fractionAt(mouseX) * total).toInt())
+    PlaybackControls.seekTo((fractionAt(mouseX) * total).toInt())
   }
 
   override fun mouseClicked(mouseX: Double, mouseY: Double, button: Int): Boolean {
@@ -90,14 +90,13 @@ class PlaybackTimelineScreen : Screen(Component.literal("Timeline")) {
     // A plain translucent fill nearly disappears against a bright world - an outline makes the
     // bar findable even when it has nothing to show yet (no total, see below).
     guiGraphics.fill(x0 - 1, y - 1, x1 + 1, y + barHeight + 1, 0xFFFFFFFF.toInt())
-    guiGraphics.fill(x0, y, x1, y + barHeight, 0x80000000.toInt())
+    ModHud.drawTimelineBar(guiGraphics, x0, x1, y, barHeight)
 
     val label = if (total != null) {
       val fraction = (current.toFloat() / total).coerceIn(0f, 1f)
       val fillX = x0 + (fraction * (x1 - x0)).toInt()
-      guiGraphics.fill(x0, y, fillX, y + barHeight, 0xFF55FF55.toInt())
       guiGraphics.fill((fillX - 1).coerceIn(x0, x1 - 2), y - 2, (fillX + 1).coerceIn(x0 + 2, x1), y + barHeight + 2, 0xFFFFFFFF.toInt())
-      "${formatTime(current)} / ${formatTime(total)}  (click or drag the bar)"
+      "${formatTime(current)} / ${formatTime(total)}  (click or drag the bar, T or Esc to close)"
     } else {
       "${formatTime(current)} - no duration data for this recording, can't scrub (record something new to enable this)"
     }

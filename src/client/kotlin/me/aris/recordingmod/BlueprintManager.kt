@@ -62,10 +62,23 @@ object BlueprintManager {
     return SloMoRegion(start..end, multiplier)
   }
 
-  fun hasProxy(blueprint: Blueprint): Boolean = File("proxies", "${blueprint.baseName}.mp4").exists()
+  fun proxyFile(blueprint: Blueprint) = File("proxies", "${blueprint.baseName}.mp4")
 
-  fun hasFinal(blueprint: Blueprint): Boolean =
-    File(RecordingConfig.finalRenderPath, "${blueprint.baseName}.mp4").exists()
+  fun finalFile(blueprint: Blueprint) = File(RecordingConfig.finalRenderPath, "${blueprint.baseName}.mp4")
+
+  fun hasProxy(blueprint: Blueprint): Boolean = proxyFile(blueprint).exists()
+
+  fun hasFinal(blueprint: Blueprint): Boolean = finalFile(blueprint).exists()
+
+  // From the I/O points set while watching a replay (see PlaybackControls). Reuses an existing
+  // blueprint file for the exact same range rather than failing on it.
+  fun create(startTick: Int, endTick: Int, recordingBaseName: String): Blueprint? {
+    if (endTick <= startTick) return null
+    dir.mkdirs()
+    val file = File(dir, "$startTick..$endTick-$recordingBaseName.bp")
+    if (!file.exists()) file.createNewFile()
+    return parse(file)
+  }
 
   // A blueprint spans from 20 seconds before a marked moment to 5 seconds after it (20 ticks/sec),
   // matching the legacy mod's window exactly.

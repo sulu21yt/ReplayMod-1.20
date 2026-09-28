@@ -32,32 +32,42 @@ To use the built mod in your own real Minecraft install instead of the dev clien
 - **Scrubbing**: jump forward/backward by 5s or 30s during normal playback, scroll the mouse wheel to scrub continuously, or open a draggable timeline bar to click/drag to any point.
 - **Markers**: instantly bookmark a moment while recording (no typing, no interrupting what you're doing - auto-named by elapsed time), rename it afterward, and jump straight to it later from the Markers screen.
 - **Blueprints & video export**: mark tick ranges as blueprints with per-region slow-motion (Blend Factor motion blur) and export them to `.mp4` via an ffmpeg pipe, with real game audio captured through an OpenAL loopback and synced to any slow-mo regions. Export runs as fast as possible rather than in real time.
-- **Recordings/Markers screens**: browse saved recordings and markers, scrollable with the mouse wheel once there are more than fit on screen. Each recording shows a thumbnail (captured when recording stops) and can be renamed in place.
+- **Menu** (Recordings/Markers/Blueprints/Settings tabs): browse saved recordings and markers, review blueprints (proxy/final status, watch, re-render, delete), scrollable with the mouse wheel once there are more than fit on screen. Each recording shows a thumbnail (captured when recording stops) and can be renamed in place.
 
-## Keybinds
+## Controls
 
-All keybinds are **unbound by default** — bind them yourself under *Options → Controls → Recording* after first launch:
+There are no keybinds in *Options → Controls*. Every key is fixed:
 
-| Action | What it does |
+- **Recording** starts automatically when you join a world and stops when you leave.
+- **L** marks the current moment while recording. It's auto-named by elapsed time, and you can rename it later from the Markers tab.
+- **The menu** opens from the *Recording Mod* button in the top-left corner of the title screen and the pause menu. It has four tabs: Recordings, Markers, Blueprints and Settings.
+
+While watching a recording:
+
+| Key | Action |
 | --- | --- |
-| Toggle Recording | Start/stop recording the current session to `recordings/<timestamp>.rec` |
-| Play Last Recording | Play back the most recently modified recording |
-| Open Recordings | Browse and play back any saved recording |
-| Open Settings | Open the recording settings screen |
-| Mark Moment | Instantly bookmark the current tick while recording (auto-named, rename later from Markers) |
-| Skip Back/Forward 5s | Scrub 5 seconds backward/forward during playback |
-| Skip Back/Forward 30s | Scrub 30 seconds backward/forward during playback |
-| Open Timeline | Open a draggable timeline bar to click/drag to any point in the recording |
-| Leave Playback | Stop watching and return to the title screen |
+| P | Return to menu |
+| Space | Play/pause |
+| Hold K | Slow motion |
+| D / A | Skip forwards/backwards 5 seconds |
+| G / F | Skip forwards/backwards 30 seconds |
+| X / Z | Skip forwards/backwards 10 minutes |
+| Period | Skip forwards one frame |
+| I | Set render start |
+| O | Set render end |
+| R | Create a blueprint from I–O and render its proxy clip |
+| T | Open/close the timeline |
+| H | Show/hide the on-screen controls list |
+| F5 | Toggle first/third person |
 
-Mouse wheel also scrubs during playback (5s per notch) — no keybind needed.
+The mouse wheel also scrubs (5s per notch).
 
 ## Known limitations
 
 - Recordings started mid-session synthesize the missing "join" state (chunks, entities, inventory, etc.) from whatever's currently loaded — very old chunks/entities far outside render distance at recording start won't be included.
 - The timeline bar and duration shown in the Recordings screen only work for recordings made after this feature was added — older recordings have no sidecar metadata and fall back to just showing elapsed time.
 - Renaming a recording does not update any markers that point at it by its old filename — they'll silently stop resolving.
-- What's shown in your inventory screen while it's open, and what you're typing in chat character-by-character before hitting enter, are not captured — both are purely local UI state that never touches the network, unlike everything else this mod records.
+- What you're typing in chat character-by-character before hitting enter is not captured. Your open inventory and containers are, and they're redrawn during playback, but a creative-mode inventory shows as the survival layout.
 - Switching from third-person to first-person partway through watching a recording that was made in third-person can leave the held item/hotbar not rendering correctly — not yet root-caused.
 
 ## Credits

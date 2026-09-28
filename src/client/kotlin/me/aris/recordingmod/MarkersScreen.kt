@@ -2,6 +2,7 @@ package me.aris.recordingmod
 
 import net.minecraft.client.gui.GuiGraphics
 import net.minecraft.client.gui.components.Button
+import net.minecraft.client.gui.components.Tooltip
 import net.minecraft.client.gui.screens.Screen
 import net.minecraft.network.chat.Component
 import java.io.File
@@ -10,7 +11,7 @@ import kotlin.math.sign
 // Lists saved markers (see MarkerManager) so you can jump straight to a bookmarked moment in a
 // recording instead of scrubbing through it manually. Scrollable with the mouse wheel once there
 // are more than fit on screen.
-class MarkersScreen(private val parent: Screen?) : Screen(Component.literal("Markers")) {
+class MarkersScreen(parent: Screen?) : RecordingModTabScreen(MenuTab.MARKERS, parent) {
   private var markers: List<MarkerManager.Marker> = emptyList()
   private var scrollOffset = 0
   private var maxVisible = 1
@@ -20,11 +21,11 @@ class MarkersScreen(private val parent: Screen?) : Screen(Component.literal("Mar
   private val renameButtonWidth = buttonWidth - jumpButtonWidth - 4
   private val buttonHeight = 20
   private val spacing = 4
-  private val startY = 40
+  private val startY = CONTENT_TOP + 34
 
   override fun init() {
     markers = MarkerManager.list()
-    maxVisible = ((this.height - startY - 40) / (buttonHeight + spacing)).coerceAtLeast(1)
+    maxVisible = ((this.height - startY - 34) / (buttonHeight + spacing)).coerceAtLeast(1)
     scrollOffset = scrollOffset.coerceIn(0, maxScrollOffset())
 
     rebuildList()
@@ -34,6 +35,31 @@ class MarkersScreen(private val parent: Screen?) : Screen(Component.literal("Mar
 
   private fun rebuildList() {
     clearWidgets()
+    addTabBar()
+
+    val actionWidth = (buttonWidth - 4) / 2
+    val actionsX = this.width / 2 - buttonWidth / 2
+    addRenderableWidget(
+      Button.builder(Component.literal("Generate From Recordings")) {
+        val created = MarkerGenerator.generateForAllRecordings()
+        this.minecraft?.setScreen(MarkersScreen(parent))
+        RecordingModMenu.toast("Generated $created marker(s)")
+      }
+        .tooltip(Tooltip.create(Component.literal(
+          "Scans every recording for Hypixel SkyBlock Dungeons events (deaths, drops, run start/complete/fail) and marks them"
+        )))
+        .bounds(actionsX, CONTENT_TOP, actionWidth, buttonHeight).build()
+    )
+    addRenderableWidget(
+      Button.builder(Component.literal("Make Blueprints")) {
+        val created = BlueprintManager.generateFromMarkers()
+        RecordingModMenu.toast("Created $created blueprint(s)")
+      }
+        .tooltip(Tooltip.create(Component.literal(
+          "Creates a blueprint (20s before to 5s after) around every marker - see the Blueprints tab"
+        )))
+        .bounds(actionsX + actionWidth + 4, CONTENT_TOP, actionWidth, buttonHeight).build()
+    )
 
     if (markers.isEmpty()) {
       addRenderableWidget(
@@ -67,11 +93,7 @@ class MarkersScreen(private val parent: Screen?) : Screen(Component.literal("Mar
       )
     }
 
-    addRenderableWidget(
-      Button.builder(Component.literal("Cancel")) { onClose() }
-        .bounds(this.width / 2 - 100, this.height - 30, 200, 20)
-        .build()
-    )
+    addDoneButton()
   }
 
   override fun mouseScrolled(mouseX: Double, mouseY: Double, delta: Double): Boolean {
@@ -84,20 +106,12 @@ class MarkersScreen(private val parent: Screen?) : Screen(Component.literal("Mar
     return true
   }
 
-  override fun onClose() {
-    this.minecraft?.setScreen(parent)
-  }
-
-  override fun render(guiGraphics: GuiGraphics, mouseX: Int, mouseY: Int, partialTick: Float) {
-    this.renderBackground(guiGraphics)
-    super.render(guiGraphics, mouseX, mouseY, partialTick)
-    guiGraphics.drawCenteredString(this.font, this.title, this.width / 2, 15, 0xFFFFFF)
-
+  override fun renderContent(guiGraphics: GuiGraphics, mouseX: Int, mouseY: Int, partialTick: Float) {
     if (markers.size > maxVisible) {
       val first = scrollOffset + 1
       val last = (scrollOffset + maxVisible).coerceAtMost(markers.size)
       guiGraphics.drawCenteredString(
-        this.font, "$first-$last of ${markers.size} (scroll for more)", this.width / 2, 27, 0xA0A0A0
+        this.font, "$first-$last of ${markers.size} (scroll for more)", this.width / 2, startY - 10, 0xA0A0A0
       )
     }
   }

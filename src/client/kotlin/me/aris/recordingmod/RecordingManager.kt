@@ -28,6 +28,7 @@ import net.minecraft.network.protocol.Packet
 import net.minecraft.network.protocol.PacketFlow
 import net.minecraft.network.protocol.game.ClientboundAddPlayerPacket
 import net.minecraft.network.protocol.game.ClientboundContainerSetContentPacket
+import net.minecraft.network.protocol.game.ClientboundContainerSetSlotPacket
 import net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket
 import net.minecraft.network.protocol.game.ClientboundLoginPacket
 import net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket
@@ -50,6 +51,10 @@ import net.minecraft.world.level.block.Block
 import net.minecraft.world.level.block.state.BlockState
 import org.slf4j.LoggerFactory
 import java.io.BufferedOutputStream
+import net.minecraft.world.item.ItemStack
+import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen
+import net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen
+import net.minecraft.client.gui.screens.inventory.InventoryScreen
 import java.io.File
 import java.io.FileOutputStream
 import java.util.EnumSet
@@ -76,6 +81,10 @@ object RecordingManager {
     private set
 
   private var out: BufferedOutputStream? = null
+
+  // What the local player's inventory looked like at the last tick we recorded - see
+  // writeInventoryChanges.
+  private val lastInventory = mutableListOf<ItemStack>()
 
   // The most recent ClientboundLoginPacket, and (if it happened after that login, e.g. a
   // dimension change) the most recent ClientboundRespawnPacket - tracked at ALL times, not just
@@ -107,6 +116,7 @@ object RecordingManager {
       active = true
       currentFile = file
       currentTick = 0
+      lastInventory.clear()
       cachedLoginPacket?.let { writePacket(it) }
       cachedUpdateTagsPacket?.let { writePacket(it) }
       cachedRespawnPacket?.let { writePacket(it) }
@@ -114,6 +124,27 @@ object RecordingManager {
       writeChunkSnapshot()
       writeEntitySnapshot()
       writeInventorySnapshot()
+      LOGGER.info("Started recording to {}", file)
+    }
+  }
+
+  fun newRecordingFile(): File {
+    val name = java.text.SimpleDateFormat("yyyy_MM_dd_HH_mm_ss").format(java.util.Date())
+    return File(RecordingConfig.recordingsDir, "$name.rec")
+  }
+
+  // Starts a recording at the very beginning of a connection - unlike start(), nothing needs to be
+  // synthesized (no world exists yet), the login packet and everything after it are recorded as
+  // they arrive.
+  private fun startFresh(file: File) {
+    synchronized(lock) {
+      stopInternal()
+      file.parentFile?.mkdirs()
+      out = BufferedOutputStream(FileOutputStream(file))
+      currentFile = file
+      currentTick = 0
+      lastInventory.clear()
+      active = true
       LOGGER.info("Started recording to {}", file)
     }
   }
@@ -196,6 +227,14 @@ object RecordingManager {
       cachedRespawnPacket = null
       cachedSpawnPositionPacket = null
       cachedUpdateTagsPacket = null
+      // Auto-record starts right here on the network thread, not from a main-thread join event:
+      // the server streams chunks/entities immediately after login, and those arrive here before
+      // the main thread has even handled the login packet - starting any later silently drops
+      // them, leaving playback with no terrain. Playback's own fake connection never passes
+      // through here (it calls packet.handle directly), so this can't record a replay.
+      if (!PlaybackManager.active && !VideoExporter.isBusy) {
+        startFresh(newRecordingFile())
+      }
     } else if (packet is ClientboundRespawnPacket) {
       cachedRespawnPacket = packet
     } else if (packet is ClientboundSetDefaultSpawnPositionPacket) {
@@ -320,6 +359,28 @@ object RecordingManager {
           writePacket(ClientboundSetEquipmentPacket(entity.id, equipment))
         }
       }
+    }
+  }
+
+  // Caller must hold `lock`. Inventory changes the client makes itself - dropping with Q, clicking
+  // or throwing items out in the inventory screen - are client-predicted: the server just adopts
+  // the client's claimed slot contents (see ServerGamePacketListenerImpl.handleContainerClick's
+  // setRemoteSlotNoCopy) and never sends them back, so they never show up in the packet stream.
+  // Diff the real inventory once per tick instead and record every changed slot as a
+  // PLAYER_INVENTORY (-2) slot packet, which playback applies straight to Inventory regardless of
+  // what container menu happens to be open.
+  private fun writeInventoryChanges(player: net.minecraft.world.entity.player.Player) {
+    val inventory = player.inventory
+    for (slot in 0 until inventory.containerSize) {
+      val stack = inventory.getItem(slot)
+      val previous = lastInventory.getOrNull(slot)
+      if (previous != null && ItemStack.matches(previous, stack)) continue
+      if (previous == null && stack.isEmpty) {
+        lastInventory.add(ItemStack.EMPTY)
+        continue
+      }
+      writePacket(ClientboundContainerSetSlotPacket(ClientboundContainerSetSlotPacket.PLAYER_INVENTORY, 0, slot, stack.copy()))
+      if (previous == null) lastInventory.add(stack.copy()) else lastInventory[slot] = stack.copy()
     }
   }
 
@@ -585,14 +646,31 @@ object RecordingManager {
     }
     skinCustomization.writeByte(mask)
 
+    val screenState = newBuffer()
+    screenState.writeVarInt(RecordingFormat.LOCAL_SCREEN_STATE)
+    val mc = Minecraft.getInstance()
+    val kind = when (mc.screen) {
+      is InventoryScreen, is CreativeModeInventoryScreen -> RecordingFormat.SCREEN_INVENTORY
+      is AbstractContainerScreen<*> -> RecordingFormat.SCREEN_CONTAINER
+      else -> RecordingFormat.SCREEN_NONE
+    }
+    screenState.writeByte(kind)
+    if (kind != RecordingFormat.SCREEN_NONE) {
+      screenState.writeFloat((mc.mouseHandler.xpos() / mc.window.screenWidth).toFloat())
+      screenState.writeFloat((mc.mouseHandler.ypos() / mc.window.screenHeight).toFloat())
+      screenState.writeItem(player.containerMenu.carried)
+    }
+
     val tickEnd = newBuffer()
     tickEnd.writeVarInt(TICK_END)
 
     synchronized(lock) {
       val stream = out ?: return
+      writeInventoryChanges(player)
       stream.write(snapshot.toByteArray())
       stream.write(sneakState.toByteArray())
       stream.write(skinCustomization.toByteArray())
+      stream.write(screenState.toByteArray())
       stream.write(tickEnd.toByteArray())
     }
     currentTick++

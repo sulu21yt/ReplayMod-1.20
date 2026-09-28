@@ -14,7 +14,7 @@ import kotlin.math.sign
 
 // A simple list of past recordings so you can watch one back later, not just the most recent one.
 // Scrollable with the mouse wheel once there are more than fit on screen.
-class RecordingsScreen(private val parent: Screen?) : Screen(Component.literal("Recordings")) {
+class RecordingsScreen(parent: Screen?) : RecordingModTabScreen(MenuTab.RECORDINGS, parent) {
   private val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss")
   private var files: List<File> = emptyList()
   private var scrollOffset = 0
@@ -36,13 +36,13 @@ class RecordingsScreen(private val parent: Screen?) : Screen(Component.literal("
   private val renameButtonWidth = buttonWidth - playButtonWidth - exportButtonWidth - 8
   private val buttonHeight = 20
   private val spacing = 4
-  private val startY = 40
+  private val startY = CONTENT_TOP + 10
 
   override fun init() {
     files = RecordingConfig.recordingsDir.listFiles { f -> f.extension == "rec" }
       ?.sortedByDescending { it.lastModified() }
       ?: emptyList()
-    maxVisible = ((this.height - startY - 40) / (buttonHeight + spacing)).coerceAtLeast(1)
+    maxVisible = ((this.height - startY - 34) / (buttonHeight + spacing)).coerceAtLeast(1)
     scrollOffset = scrollOffset.coerceIn(0, maxScrollOffset())
 
     rebuildList()
@@ -76,6 +76,7 @@ class RecordingsScreen(private val parent: Screen?) : Screen(Component.literal("
   private fun rebuildList() {
     clearWidgets()
     releaseThumbnails()
+    addTabBar()
 
     if (files.isEmpty()) {
       addRenderableWidget(
@@ -116,11 +117,7 @@ class RecordingsScreen(private val parent: Screen?) : Screen(Component.literal("
       )
     }
 
-    addRenderableWidget(
-      Button.builder(Component.literal("Cancel")) { onClose() }
-        .bounds(this.width / 2 - 100, this.height - 30, 200, 20)
-        .build()
-    )
+    addDoneButton()
   }
 
   override fun mouseScrolled(mouseX: Double, mouseY: Double, delta: Double): Boolean {
@@ -133,15 +130,7 @@ class RecordingsScreen(private val parent: Screen?) : Screen(Component.literal("
     return true
   }
 
-  override fun onClose() {
-    this.minecraft?.setScreen(parent)
-  }
-
-  override fun render(guiGraphics: GuiGraphics, mouseX: Int, mouseY: Int, partialTick: Float) {
-    this.renderBackground(guiGraphics)
-    super.render(guiGraphics, mouseX, mouseY, partialTick)
-    guiGraphics.drawCenteredString(this.font, this.title, this.width / 2, 15, 0xFFFFFF)
-
+  override fun renderContent(guiGraphics: GuiGraphics, mouseX: Int, mouseY: Int, partialTick: Float) {
     val rx = rowX()
     thumbnails.forEachIndexed { index, thumbnail ->
       if (thumbnail == null) return@forEachIndexed
@@ -160,7 +149,7 @@ class RecordingsScreen(private val parent: Screen?) : Screen(Component.literal("
       val first = scrollOffset + 1
       val last = (scrollOffset + maxVisible).coerceAtMost(files.size)
       guiGraphics.drawCenteredString(
-        this.font, "$first-$last of ${files.size} (scroll for more)", this.width / 2, 27, 0xA0A0A0
+        this.font, "$first-$last of ${files.size} (scroll for more)", this.width / 2, CONTENT_TOP - 2, 0xA0A0A0
       )
     }
   }
