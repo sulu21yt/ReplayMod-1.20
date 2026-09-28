@@ -1,14 +1,12 @@
 package me.aris.recordingmod
 
 import net.minecraft.ChatFormatting
-import net.minecraft.Util
 import net.minecraft.client.Minecraft
 import net.minecraft.client.gui.GuiGraphics
 import net.minecraft.network.chat.Component
 import java.io.File
 
-// On-screen overlay: a small REC indicator while recording live, and during playback a status
-// panel, a progress bar (with the I/O render range and this recording's markers on it) and the
+// On-screen overlay during playback: a status panel, a progress bar (with the I/O render range and this recording's markers on it) and the
 // fixed controls list (toggled with H). Never drawn during an export, so it can't end up in the
 // rendered video.
 object ModHud {
@@ -28,38 +26,14 @@ object ModHud {
     "H" to "Hide this list"
   )
 
-  private var markerFlashUntil = 0L
-
   // Marker ticks for the recording being watched - read from disk once per recording, not per frame.
   private var markerCacheFile: File? = null
   private var markerTicks: List<Int> = emptyList()
 
-  fun flashMarker() {
-    markerFlashUntil = Util.getMillis() + 1500
-  }
-
   fun render(guiGraphics: GuiGraphics) {
     val mc = Minecraft.getInstance()
     if (VideoExporter.isBusy || mc.options.renderDebug) return
-    if (PlaybackManager.active) {
-      renderPlayback(guiGraphics, mc)
-    } else if (RecordingManager.active) {
-      renderRecording(guiGraphics, mc)
-    }
-  }
-
-  private fun renderRecording(guiGraphics: GuiGraphics, mc: Minecraft) {
-    val font = mc.font
-    val time = PlaybackControls.formatTime(RecordingManager.currentTick)
-    val marked = Util.getMillis() < markerFlashUntil
-    val text = if (marked) "REC $time  Marked!" else "REC $time"
-    val width = 14 + font.width(text) + 4
-    guiGraphics.fill(2, 2, 2 + width, 16, PANEL_BG)
-    // Blinks once a second, like a camera's record light.
-    if (Util.getMillis() / 500 % 2 == 0L) {
-      guiGraphics.fill(6, 6, 12, 12, 0xFFFF3030.toInt())
-    }
-    guiGraphics.drawString(font, text, 16, 5, if (marked) 0xFFFF55 else 0xFFFFFF)
+    if (PlaybackManager.active) renderPlayback(guiGraphics, mc)
   }
 
   private fun renderPlayback(guiGraphics: GuiGraphics, mc: Minecraft) {

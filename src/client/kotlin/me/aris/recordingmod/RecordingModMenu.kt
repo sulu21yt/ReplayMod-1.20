@@ -15,7 +15,7 @@ enum class MenuTab(val label: String) {
   SETTINGS("Settings")
 }
 
-// The mod's one menu, opened from the "Recording Mod" button on the title and pause screens - each
+// The mod's one menu, opened from the record icon button on the title and pause screens - each
 // tab is its own Screen sharing the tab bar below, and switching tabs keeps the same parent so
 // Done/Esc always goes back to wherever the menu was opened from.
 object RecordingModMenu {

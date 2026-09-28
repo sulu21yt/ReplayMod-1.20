@@ -7,10 +7,10 @@ import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback
 import net.fabricmc.fabric.api.client.screen.v1.ScreenEvents
 import net.fabricmc.fabric.api.client.screen.v1.Screens
 import net.minecraft.client.Minecraft
-import net.minecraft.client.gui.components.Button
 import net.minecraft.client.gui.screens.PauseScreen
 import net.minecraft.client.gui.screens.TitleScreen
 import net.minecraft.network.chat.Component
+import net.minecraft.network.chat.contents.TranslatableContents
 import org.lwjgl.glfw.GLFW
 import org.slf4j.LoggerFactory
 
@@ -51,14 +51,21 @@ object RecordingModClient : ClientModInitializer {
     HudRenderCallback.EVENT.register { guiGraphics, _ -> ReplayScreenOverlay.render(guiGraphics) }
     HudRenderCallback.EVENT.register { guiGraphics, _ -> ModHud.render(guiGraphics) }
 
+    // A small icon button beside the top button of the title/pause screen, in the same style (and,
+    // on the title screen, the same column) as vanilla's language button.
     ScreenEvents.AFTER_INIT.register { _, screen, _, _ ->
-      if (screen is TitleScreen || screen is PauseScreen) {
-        Screens.getButtons(screen).add(
-          Button.builder(Component.literal("Recording Mod")) {
-            Minecraft.getInstance().setScreen(RecordingModMenu.open(MenuTab.RECORDINGS, screen))
-          }.bounds(4, 4, 90, 20).build()
-        )
+      val anchorKey = when (screen) {
+        is TitleScreen -> "menu.singleplayer"
+        is PauseScreen -> "menu.returnToGame"
+        else -> return@register
       }
+      val buttons = Screens.getButtons(screen)
+      val anchor = buttons.firstOrNull { (it.message.contents as? TranslatableContents)?.key == anchorKey }
+      val x = anchor?.let { it.x - 24 } ?: 4
+      val y = anchor?.y ?: 4
+      buttons.add(RecordIconButton(x, y) {
+        Minecraft.getInstance().setScreen(RecordingModMenu.open(MenuTab.RECORDINGS, screen))
+      })
     }
 
     LOGGER.info("Recording Mod initialized")
@@ -85,7 +92,6 @@ object RecordingModClient : ClientModInitializer {
     val tick = RecordingManager.currentTick
     val name = PlaybackControls.formatTime(tick)
     MarkerManager.save(name, file.nameWithoutExtension, tick)
-    ModHud.flashMarker()
     mc.player?.displayClientMessage(Component.literal("Marked moment ($name)"), true)
   }
 }

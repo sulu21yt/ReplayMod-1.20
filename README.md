@@ -40,7 +40,7 @@ There are no keybinds in *Options → Controls*. Every key is fixed:
 
 - **Recording** starts automatically when you join a world and stops when you leave.
 - **L** marks the current moment while recording. It's auto-named by elapsed time, and you can rename it later from the Markers tab.
-- **The menu** opens from the *Recording Mod* button in the top-left corner of the title screen and the pause menu. It has four tabs: Recordings, Markers, Blueprints and Settings.
+- **The menu** opens from the red record icon button, which sits left of *Singleplayer* on the title screen and left of *Back to Game* in the pause menu. It has four tabs: Recordings, Markers, Blueprints and Settings.
 
 While watching a recording:
 
