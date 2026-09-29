@@ -40,6 +40,8 @@ import net.minecraft.world.entity.player.Player
 import net.minecraft.world.level.block.Block
 import net.minecraft.world.phys.Vec3
 import org.slf4j.LoggerFactory
+import java.io.BufferedInputStream
+import java.io.DataInputStream
 import java.io.File
 import kotlin.math.abs
 
@@ -66,6 +68,11 @@ object PlaybackManager {
 
   private var previous: LookState? = null
   private var current: LookState? = null
+
+  // The recording's live per-frame camera rotations (see RecordingManager.onRenderFrame), keyed by
+  // tick - each array holds (partialTick, yaw, pitch) triples. Empty for recordings made before
+  // those were captured, which fall back to interpolating the 20Hz tick snapshots.
+  private var viewSamples: Map<Int, FloatArray> = emptyMap()
 
   // Our own reimplementation of Entity's private moveDist/nextStep fields, since footstep sounds
   // are normally a side effect of Entity.move()'s physics pass, which playback never calls (see
@@ -158,6 +165,7 @@ object PlaybackManager {
     this.buf = FriendlyByteBuf(Unpooled.wrappedBuffer(file.readBytes()))
     this.currentFile = file
     this.totalTicks = RecordingMetadata.readTotalTicks(file)
+    this.viewSamples = loadViewSamples(file)
     this.active = true
     LOGGER.info("Started playback of {}", file)
   }
@@ -172,6 +180,7 @@ object PlaybackManager {
     currentFile = null
     previous = null
     current = null
+    viewSamples = emptyMap()
     stepMoveDist = 0f
     stepNextThreshold = 1f
     wasInWater = false
@@ -605,13 +614,9 @@ object PlaybackManager {
   fun onRenderFrame(partialTick: Float) {
     if (!active) return
 
-    // During a fast (as-fast-as-possible) export, VideoExporter drives our tick() directly - not
-    // at Minecraft's real ~20/sec pace, which is also what the real partialTick argument is timed
-    // against, so it no longer means anything useful for us. nextRenderFrameFraction() ticks us
-    // forward as needed for this frame (possibly updating previous/current below) and returns the
-    // correct in-between fraction itself, so read it *before* previous/current rather than using
-    // the real partialTick.
-    val effectivePartialTick = if (VideoExporter.active) VideoExporter.nextRenderFrameFraction() else partialTick
+    // During an export, vanilla's timer is driven by the export clock (see TimerMixin), so
+    // partialTick is the real fraction between our previous/current ticks there too.
+    val effectivePartialTick = partialTick
     renderPartialTick = effectivePartialTick
 
     val from = previous ?: return
@@ -621,8 +626,9 @@ object PlaybackManager {
     val x = Mth.lerp(effectivePartialTick.toDouble(), from.x, to.x)
     val y = Mth.lerp(effectivePartialTick.toDouble(), from.y, to.y)
     val z = Mth.lerp(effectivePartialTick.toDouble(), from.z, to.z)
-    val yaw = Mth.rotLerp(effectivePartialTick, from.yaw, to.yaw)
-    val pitch = Mth.lerp(effectivePartialTick, from.pitch, to.pitch)
+    val sampled = sampledRotation(currentTick, effectivePartialTick)
+    val yaw = sampled?.first ?: Mth.rotLerp(effectivePartialTick, from.yaw, to.yaw)
+    val pitch = sampled?.second ?: Mth.lerp(effectivePartialTick, from.pitch, to.pitch)
 
     // Camera.setup (and Entity.getPosition/getEyePosition) do their OWN Mth.lerp(partialTick, xo,
     // getX()) on top of whatever we write here. With xo left at the tick-start value (see
@@ -631,8 +637,7 @@ object PlaybackManager {
     // pulse visible whenever moving. Same double-interpolation problem as xRotO below, but xo can't
     // just be collapsed to the current value (that broke cape/hand-bob lerps, see applySnapshot).
     // Instead shift the pair so it keeps its real per-tick span (cur - prev) but vanilla's own lerp,
-    // at the partialTick it actually uses, lands exactly on our position - which also stays correct
-    // during export, where effectivePartialTick differs from the real partialTick.
+    // at the partialTick it actually uses, lands exactly on our position.
     val realF = partialTick.toDouble()
     val oldX = x - realF * (to.x - from.x)
     val oldY = y - realF * (to.y - from.y)
@@ -671,6 +676,58 @@ object PlaybackManager {
     // be as instantaneous as the camera; the body is deliberately not.
     player.yHeadRot = yaw
     player.yHeadRotO = yaw
+  }
+
+  private fun loadViewSamples(file: File): Map<Int, FloatArray> {
+    val viewFile = RecordingMetadata.viewFile(file)
+    if (!viewFile.exists()) return emptyMap()
+    val grouped = HashMap<Int, MutableList<Float>>()
+    try {
+      DataInputStream(BufferedInputStream(viewFile.inputStream())).use { input ->
+        while (input.available() >= 16) {
+          val list = grouped.getOrPut(input.readInt()) { mutableListOf() }
+          list.add(input.readFloat())
+          list.add(input.readFloat())
+          list.add(input.readFloat())
+        }
+      }
+    } catch (e: Exception) {
+      LOGGER.warn("Failed to read camera samples from {}", viewFile, e)
+    }
+    return grouped.mapValues { it.value.toFloatArray() }
+  }
+
+  // The recorded live rotation at `fraction` of the way through `tick`, linearly interpolated
+  // between the two nearest recorded frames (which can lie in the neighbouring ticks) - export fps
+  // rarely matches the fps the recording was made at. Null if nothing was recorded for this tick.
+  private fun sampledRotation(tick: Int, fraction: Float): Pair<Float, Float>? {
+    val samples = viewSamples[tick] ?: return null
+    var t0 = Float.NEGATIVE_INFINITY
+    var yaw0 = 0f
+    var pitch0 = 0f
+    var t1 = Float.POSITIVE_INFINITY
+    var yaw1 = 0f
+    var pitch1 = 0f
+    fun consider(s: FloatArray, offset: Float) {
+      for (i in s.indices step 3) {
+        val t = s[i] + offset
+        if (t <= fraction && t > t0) {
+          t0 = t; yaw0 = s[i + 1]; pitch0 = s[i + 2]
+        } else if (t > fraction && t < t1) {
+          t1 = t; yaw1 = s[i + 1]; pitch1 = s[i + 2]
+        }
+      }
+    }
+    viewSamples[tick - 1]?.let { consider(it, -1f) }
+    consider(samples, 0f)
+    viewSamples[tick + 1]?.let { consider(it, 1f) }
+
+    if (t0 == Float.NEGATIVE_INFINITY) return yaw1 to pitch1
+    if (t1 == Float.POSITIVE_INFINITY) return yaw0 to pitch0
+    val a = (fraction - t0) / (t1 - t0)
+    // LocalPlayer's yRot is never wrapped, so a plain lerp is right (rotLerp would take the short
+    // way round across a full turn recorded between two frames).
+    return Mth.lerp(a, yaw0, yaw1) to Mth.lerp(a, pitch0, pitch1)
   }
 
   private fun applyBlockChange(buf: FriendlyByteBuf) {

@@ -55,6 +55,7 @@ import net.minecraft.world.item.ItemStack
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen
 import net.minecraft.client.gui.screens.inventory.CreativeModeInventoryScreen
 import net.minecraft.client.gui.screens.inventory.InventoryScreen
+import java.io.DataOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.util.EnumSet
@@ -81,6 +82,7 @@ object RecordingManager {
     private set
 
   private var out: BufferedOutputStream? = null
+  private var viewOut: DataOutputStream? = null
 
   // What the local player's inventory looked like at the last tick we recorded - see
   // writeInventoryChanges.
@@ -113,6 +115,7 @@ object RecordingManager {
       stopInternal()
       file.parentFile?.mkdirs()
       out = BufferedOutputStream(FileOutputStream(file))
+      viewOut = DataOutputStream(BufferedOutputStream(FileOutputStream(RecordingMetadata.viewFile(file))))
       active = true
       currentFile = file
       currentTick = 0
@@ -141,6 +144,7 @@ object RecordingManager {
       stopInternal()
       file.parentFile?.mkdirs()
       out = BufferedOutputStream(FileOutputStream(file))
+      viewOut = DataOutputStream(BufferedOutputStream(FileOutputStream(RecordingMetadata.viewFile(file))))
       currentFile = file
       currentTick = 0
       lastInventory.clear()
@@ -167,6 +171,8 @@ object RecordingManager {
       it.close()
     }
     out = null
+    viewOut?.close()
+    viewOut = null
 
     if (wasActive && finishedFile != null) {
       saveMetadataAndThumbnail(finishedFile, finishedTicks)
@@ -674,5 +680,25 @@ object RecordingManager {
       stream.write(tickEnd.toByteArray())
     }
     currentTick++
+  }
+
+  // Called from GameRendererMixin once per rendered frame. The per-tick PLAYER_SNAPSHOT only
+  // catches the camera rotation 20 times a second, but live the mouse turns it every frame (the
+  // camera reads LocalPlayer's raw yRot/xRot, no per-tick lerp) - linearly interpolating between
+  // those 20Hz samples turned every uneven mouse movement into a visible speed jump at each tick
+  // boundary. So also record the exact rotation of every frame, keyed by how many ticks had been
+  // recorded when it was shown plus the frame's partialTick, for PlaybackManager to replay. Kept in
+  // a sidecar file rather than the tick stream because playback needs them one tick ahead of where
+  // the stream would put them (they're only known after that tick's TICK_END has been written).
+  fun onRenderFrame(partialTick: Float) {
+    if (!active) return
+    val player = Minecraft.getInstance().player ?: return
+    synchronized(lock) {
+      val stream = viewOut ?: return
+      stream.writeInt(currentTick)
+      stream.writeFloat(partialTick)
+      stream.writeFloat(player.getViewYRot(partialTick))
+      stream.writeFloat(player.getViewXRot(partialTick))
+    }
   }
 }

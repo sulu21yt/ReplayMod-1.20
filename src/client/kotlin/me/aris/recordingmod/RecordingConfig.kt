@@ -24,6 +24,11 @@ object RecordingConfig {
   var blendFactor = 10
   var proxyRenderingWidth = 1920
   var proxyRenderingHeight = 1080
+  // ffmpeg -pix_fmt for renders: yuv420p is the most compatible, yuv444p keeps full colour
+  // resolution (sharper coloured edges) at the cost of bigger files and weaker player support.
+  var pixelFormat = "yuv420p"
+  // x264 CRF - lower is sharper and bigger, 0 is lossless.
+  var videoQuality = 12
 
   private data class Data(
     val recordingPath: String = "recordings",
@@ -34,7 +39,11 @@ object RecordingConfig {
     val renderingFps: Int = 60,
     val blendFactor: Int = 10,
     val proxyRenderingWidth: Int = 1920,
-    val proxyRenderingHeight: Int = 1080
+    val proxyRenderingHeight: Int = 1080,
+    // Nullable: Gson skips Kotlin defaults, so these read back as null from configs saved before
+    // they existed.
+    val pixelFormat: String? = "yuv420p",
+    val videoQuality: Int? = 12
   )
 
   fun load() {
@@ -50,6 +59,8 @@ object RecordingConfig {
       blendFactor = data.blendFactor
       proxyRenderingWidth = data.proxyRenderingWidth
       proxyRenderingHeight = data.proxyRenderingHeight
+      pixelFormat = data.pixelFormat ?: "yuv420p"
+      videoQuality = data.videoQuality ?: 12
     } catch (e: Exception) {
       LOGGER.warn("Failed to load {}, using defaults", file, e)
     }
@@ -58,7 +69,7 @@ object RecordingConfig {
   fun save() {
     val data = Data(
       recordingPath, finalRenderPath, ffmpegPath, renderingWidth, renderingHeight,
-      renderingFps, blendFactor, proxyRenderingWidth, proxyRenderingHeight
+      renderingFps, blendFactor, proxyRenderingWidth, proxyRenderingHeight, pixelFormat, videoQuality
     )
     try {
       file.parentFile?.mkdirs()
@@ -69,4 +80,6 @@ object RecordingConfig {
   }
 
   val recordingsDir: File get() = File(recordingPath)
+
+  val PIXEL_FORMATS = listOf("yuv420p", "yuv422p", "yuv444p")
 }

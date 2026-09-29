@@ -51,6 +51,7 @@ class RenameRecordingScreen(private val recordingFile: File, private val parent:
     recordingFile.renameTo(newRecordingFile)
     RecordingMetadata.metadataFile(recordingFile).let { if (it.exists()) it.renameTo(RecordingMetadata.metadataFile(newRecordingFile)) }
     RecordingMetadata.thumbnailFile(recordingFile).let { if (it.exists()) it.renameTo(RecordingMetadata.thumbnailFile(newRecordingFile)) }
+    RecordingMetadata.viewFile(recordingFile).let { if (it.exists()) it.renameTo(RecordingMetadata.viewFile(newRecordingFile)) }
 
     onClose()
   }

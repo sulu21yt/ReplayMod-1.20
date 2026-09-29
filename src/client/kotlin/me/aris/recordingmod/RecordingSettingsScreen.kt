@@ -2,6 +2,8 @@ package me.aris.recordingmod
 
 import net.minecraft.ChatFormatting
 import net.minecraft.client.gui.GuiGraphics
+import net.minecraft.client.gui.components.AbstractSliderButton
+import net.minecraft.client.gui.components.CycleButton
 import net.minecraft.client.gui.components.EditBox
 import net.minecraft.client.gui.components.Tooltip
 import net.minecraft.client.gui.screens.Screen
@@ -24,13 +26,15 @@ class RecordingSettingsScreen(parent: Screen?) : RecordingModTabScreen(MenuTab.S
   private lateinit var renderingFpsField: EditBox
   private lateinit var proxyRenderingWidthField: EditBox
   private lateinit var proxyRenderingHeightField: EditBox
+  private var pixelFormat = RecordingConfig.pixelFormat
+  private var videoQuality = RecordingConfig.videoQuality
 
   override fun init() {
     labels.clear()
 
     val fieldLabelTexts = listOf(
       "Recording Path", "Final Render Path", "Ffmpeg Path", "Rendering Width", "Rendering Height",
-      "Rendering Fps", "Proxy Rendering Width", "Proxy Rendering Height"
+      "Rendering Fps", "Color Format", "Quality (CRF)", "Proxy Rendering Width", "Proxy Rendering Height"
     )
     val labelColumnWidth = fieldLabelTexts.maxOf { this.font.width(it) }
     val fieldWidth = 170
@@ -75,6 +79,24 @@ class RecordingSettingsScreen(parent: Screen?) : RecordingModTabScreen(MenuTab.S
       "Output video frame rate used for every video render"
     )
     y += 22
+    pixelFormat = RecordingConfig.pixelFormat
+    labels.add(DrawnLabel("Color Format", labelX, y, isHeader = false))
+    addRenderableWidget(
+      CycleButton.builder<String> { Component.literal(it) }
+        .withValues(RecordingConfig.PIXEL_FORMATS)
+        .withInitialValue(pixelFormat.takeIf { it in RecordingConfig.PIXEL_FORMATS } ?: "yuv420p")
+        .displayOnlyValue()
+        .withTooltip { Tooltip.create(Component.literal(
+          "yuv420p: most compatible. yuv444p: full colour resolution, sharper coloured edges, " +
+            "bigger files - some players/editors can't play it"
+        )) }
+        .create(fieldColumnX, y, fieldWidth, 18, Component.literal("Color Format")) { _, value -> pixelFormat = value }
+    )
+    y += 22
+    videoQuality = RecordingConfig.videoQuality
+    labels.add(DrawnLabel("Quality (CRF)", labelX, y, isHeader = false))
+    addRenderableWidget(QualitySlider(fieldColumnX, y, fieldWidth))
+    y += 22
     proxyRenderingWidthField = addField(
       labelX, y, "Proxy Rendering Width", fieldWidth, RecordingConfig.proxyRenderingWidth.toString(),
       "Output width in pixels for quick low-effort proxy renders - the window is resized to this instead while proxy-rendering"
@@ -115,7 +137,26 @@ class RecordingSettingsScreen(parent: Screen?) : RecordingModTabScreen(MenuTab.S
       proxyRenderingWidthField.value.toIntOrNull() ?: RecordingConfig.proxyRenderingWidth
     RecordingConfig.proxyRenderingHeight =
       proxyRenderingHeightField.value.toIntOrNull() ?: RecordingConfig.proxyRenderingHeight
+    RecordingConfig.pixelFormat = pixelFormat
+    RecordingConfig.videoQuality = videoQuality
     RecordingConfig.save()
+  }
+
+  // x264 CRF 0..MAX_CRF - lower is sharper and bigger (0 = lossless).
+  private inner class QualitySlider(x: Int, y: Int, width: Int) :
+    AbstractSliderButton(x, y, width, 18, Component.empty(), videoQuality / MAX_CRF.toDouble()) {
+    init {
+      updateMessage()
+      setTooltip(Tooltip.create(Component.literal("Video compression (x264 CRF) - lower is sharper but bigger, 0 is lossless")))
+    }
+
+    override fun updateMessage() {
+      message = Component.literal(if (videoQuality == 0) "0 (lossless)" else videoQuality.toString())
+    }
+
+    override fun applyValue() {
+      videoQuality = Math.round(value * MAX_CRF).toInt()
+    }
   }
 
   override fun renderContent(guiGraphics: GuiGraphics, mouseX: Int, mouseY: Int, partialTick: Float) {
@@ -131,5 +172,9 @@ class RecordingSettingsScreen(parent: Screen?) : RecordingModTabScreen(MenuTab.S
         )
       }
     }
+  }
+
+  private companion object {
+    const val MAX_CRF = 30
   }
 }

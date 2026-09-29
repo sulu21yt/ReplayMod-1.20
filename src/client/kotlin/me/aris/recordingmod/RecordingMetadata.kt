@@ -18,6 +18,10 @@ object RecordingMetadata {
   fun thumbnailFile(recordingFile: File): File =
     File(recordingFile.parentFile, "${recordingFile.nameWithoutExtension}.png")
 
+  // Per-render-frame camera rotation samples - see RecordingManager.onRenderFrame.
+  fun viewFile(recordingFile: File): File =
+    File(recordingFile.parentFile, "${recordingFile.nameWithoutExtension}.view")
+
   fun save(recordingFile: File, totalTicks: Int) {
     runCatching { metadataFile(recordingFile).writeText(gson.toJson(Data(totalTicks))) }
   }

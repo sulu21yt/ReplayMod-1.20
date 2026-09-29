@@ -24,6 +24,7 @@
     "ParticleEngineMixin",
     "PlayerModelCustomisationAccessorMixin",
     "TimerAccessorMixin",
+    "TimerMixin",
     "WindowMixin"
   ],
   "injectors": {
